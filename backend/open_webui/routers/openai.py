@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import aiohttp
 from aiocache import cached
@@ -98,6 +98,71 @@ async def cleanup_response(
         response.close()
     if session:
         await session.close()
+
+
+def stream_json_response_as_sse(
+    response: aiohttp.ClientResponse,
+) -> AsyncIterator[str]:
+    """Convert chunked JSON responses into SSE messages for frontend streaming."""
+
+    async def generator() -> AsyncIterator[str]:
+        decoder = json.JSONDecoder()
+        buffer = ""
+        done_sent = False
+
+        async for chunk in response.content.iter_chunked(1024):
+            if not chunk:
+                continue
+            buffer += chunk.decode("utf-8", errors="ignore")
+
+            while True:
+                buffer = buffer.lstrip()
+                if not buffer:
+                    break
+
+                if buffer.startswith("[DONE]"):
+                    if not done_sent:
+                        yield "data: [DONE]\n\n"
+                        done_sent = True
+                    buffer = buffer[len("[DONE]") :]
+                    continue
+
+                try:
+                    obj, idx = decoder.raw_decode(buffer)
+                except json.JSONDecodeError:
+                    break
+
+                if idx == 0:
+                    break
+
+                buffer = buffer[idx:]
+                yield f"data: {json.dumps(obj, separators=(",", ":"))}\n\n"
+
+        buffer = buffer.lstrip()
+        if buffer:
+            if buffer.startswith("[DONE]"):
+                if not done_sent:
+                    yield "data: [DONE]\n\n"
+                    done_sent = True
+            else:
+                try:
+                    obj, idx = decoder.raw_decode(buffer)
+                except json.JSONDecodeError:
+                    log.debug(
+                        "Unconsumed streamed buffer: %s",
+                        buffer if len(buffer) < 200 else f"{buffer[:200]}...",
+                    )
+                else:
+                    yield f"data: {json.dumps(obj, separators=(",", ":"))}\n\n"
+                    buffer = buffer[idx:].lstrip()
+                    if buffer.startswith("[DONE]") and not done_sent:
+                        yield "data: [DONE]\n\n"
+                        done_sent = True
+
+        if not done_sent:
+            yield "data: [DONE]\n\n"
+
+    return generator()
 
 
 def openai_reasoning_model_handler(payload):
@@ -922,6 +987,8 @@ async def generate_chat_completion(
     else:
         request_url = f"{url}/chat/completions"
 
+    stream_requested = payload.get("stream", False)
+
     payload = json.dumps(payload)
 
     r = None
@@ -944,12 +1011,28 @@ async def generate_chat_completion(
         )
 
         # Check if response is SSE
-        if "text/event-stream" in r.headers.get("Content-Type", ""):
+        content_type = r.headers.get("Content-Type", "")
+
+        if "text/event-stream" in content_type:
             streaming = True
             return StreamingResponse(
                 r.content,
                 status_code=r.status,
                 headers=dict(r.headers),
+                background=BackgroundTask(
+                    cleanup_response, response=r, session=session
+                ),
+            )
+        elif stream_requested:
+            streaming = True
+            headers = dict(r.headers)
+            headers["Content-Type"] = "text/event-stream"
+            headers.pop("Content-Length", None)
+
+            return StreamingResponse(
+                stream_json_response_as_sse(r),
+                status_code=r.status,
+                headers=headers,
                 background=BackgroundTask(
                     cleanup_response, response=r, session=session
                 ),

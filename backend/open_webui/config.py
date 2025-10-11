@@ -1007,6 +1007,18 @@ ENABLE_OPENAI_API = PersistentConfig(
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "")
 
+DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+DASHSCOPE_API_BASE_URL = os.environ.get(
+    "DASHSCOPE_API_BASE_URL",
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+).strip()
+
+if DASHSCOPE_API_BASE_URL.endswith("/chat/completions"):
+    DASHSCOPE_API_BASE_URL = DASHSCOPE_API_BASE_URL[: -len("/chat/completions")]
+
+if DASHSCOPE_API_BASE_URL.endswith("/"):
+    DASHSCOPE_API_BASE_URL = DASHSCOPE_API_BASE_URL.rstrip("/")
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_API_BASE_URL = os.environ.get("GEMINI_API_BASE_URL", "")
 
@@ -1017,31 +1029,59 @@ else:
     if OPENAI_API_BASE_URL.endswith("/"):
         OPENAI_API_BASE_URL = OPENAI_API_BASE_URL[:-1]
 
-OPENAI_API_KEYS = os.environ.get("OPENAI_API_KEYS", "")
-OPENAI_API_KEYS = OPENAI_API_KEYS if OPENAI_API_KEYS != "" else OPENAI_API_KEY
-
-OPENAI_API_KEYS = [url.strip() for url in OPENAI_API_KEYS.split(";")]
-OPENAI_API_KEYS = PersistentConfig(
-    "OPENAI_API_KEYS", "openai.api_keys", OPENAI_API_KEYS
+OPENAI_API_KEYS_ENV = os.environ.get("OPENAI_API_KEYS", "")
+OPENAI_API_KEYS_ENV = (
+    OPENAI_API_KEYS_ENV if OPENAI_API_KEYS_ENV != "" else OPENAI_API_KEY
 )
 
-OPENAI_API_BASE_URLS = os.environ.get("OPENAI_API_BASE_URLS", "")
-OPENAI_API_BASE_URLS = (
-    OPENAI_API_BASE_URLS if OPENAI_API_BASE_URLS != "" else OPENAI_API_BASE_URL
+openai_api_keys_list = [url.strip() for url in OPENAI_API_KEYS_ENV.split(";")]
+
+OPENAI_API_BASE_URLS_ENV = os.environ.get("OPENAI_API_BASE_URLS", "")
+OPENAI_API_BASE_URLS_ENV = (
+    OPENAI_API_BASE_URLS_ENV
+    if OPENAI_API_BASE_URLS_ENV != ""
+    else OPENAI_API_BASE_URL
 )
 
-OPENAI_API_BASE_URLS = [
+openai_api_base_urls_list = [
     url.strip() if url != "" else "https://api.openai.com/v1"
-    for url in OPENAI_API_BASE_URLS.split(";")
+    for url in OPENAI_API_BASE_URLS_ENV.split(";")
 ]
-OPENAI_API_BASE_URLS = PersistentConfig(
-    "OPENAI_API_BASE_URLS", "openai.api_base_urls", OPENAI_API_BASE_URLS
+
+if DASHSCOPE_API_KEY:
+    if DASHSCOPE_API_BASE_URL in openai_api_base_urls_list:
+        dashscope_index = openai_api_base_urls_list.index(DASHSCOPE_API_BASE_URL)
+        while len(openai_api_keys_list) <= dashscope_index:
+            openai_api_keys_list.append("")
+        openai_api_keys_list[dashscope_index] = DASHSCOPE_API_KEY
+    else:
+        openai_api_base_urls_list.append(DASHSCOPE_API_BASE_URL)
+        openai_api_keys_list.append(DASHSCOPE_API_KEY)
+
+while len(openai_api_keys_list) < len(openai_api_base_urls_list):
+    openai_api_keys_list.append("")
+
+OPENAI_API_KEYS = PersistentConfig(
+    "OPENAI_API_KEYS", "openai.api_keys", openai_api_keys_list
 )
+
+OPENAI_API_BASE_URLS = PersistentConfig(
+    "OPENAI_API_BASE_URLS", "openai.api_base_urls", openai_api_base_urls_list
+)
+
+DEFAULT_OPENAI_API_CONFIGS = {}
+if DASHSCOPE_API_KEY:
+    DEFAULT_OPENAI_API_CONFIGS[DASHSCOPE_API_BASE_URL] = {
+        "enable": True,
+        "model_ids": ["qwen3-4b"],
+        "connection_type": "dashscope",
+        "tags": ["qwen3", "dashscope"],
+    }
 
 OPENAI_API_CONFIGS = PersistentConfig(
     "OPENAI_API_CONFIGS",
     "openai.api_configs",
-    {},
+    DEFAULT_OPENAI_API_CONFIGS,
 )
 
 # Get the actual OpenAI API key based on the base URL
