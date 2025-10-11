@@ -122,6 +122,22 @@
 		});
 
 		if (res) {
+			chats.update((chatList) => {
+				if (!chatList) {
+					return chatList;
+				}
+
+				return chatList.filter((item) => item.id !== id);
+			});
+
+			pinnedChats.update((chatList) => {
+				if (!chatList) {
+					return chatList;
+				}
+
+				return chatList.filter((item) => item.id !== id);
+			});
+
 			tags.set(await getAllTags(localStorage.token));
 			if ($chatId === id) {
 				await goto('/');

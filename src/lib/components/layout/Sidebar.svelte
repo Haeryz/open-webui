@@ -85,6 +85,7 @@
 	let folderRegistry = {};
 
 	let newFolderId = null;
+	let useFolderFallback = false;
 
 	const initFolders = async () => {
 		const folderList = await getFolders(localStorage.token).catch((error) => {
@@ -181,6 +182,7 @@
 		console.log('initChatList');
 		currentChatPage.set(1);
 		allChatsLoaded = false;
+		useFolderFallback = false;
 
 		initFolders();
 		await Promise.all([
@@ -196,8 +198,23 @@
 			})(),
 			await (async () => {
 				console.log('Init chat list');
-				const _chats = await getChatList(localStorage.token, $currentChatPage);
-				await chats.set(_chats);
+				let chatList = await getChatList(localStorage.token, $currentChatPage);
+
+				// When every conversation lives inside a folder the regular list comes back empty.
+				if ((chatList?.length ?? 0) === 0) {
+					const fallbackChatList = await getChatList(
+						localStorage.token,
+						$currentChatPage,
+						true
+					);
+
+					if ((fallbackChatList?.length ?? 0) > 0) {
+						chatList = fallbackChatList;
+						useFolderFallback = true;
+					}
+				}
+
+				await chats.set(chatList);
 			})()
 		]);
 
@@ -212,7 +229,11 @@
 
 		let newChatList = [];
 
-		newChatList = await getChatList(localStorage.token, $currentChatPage);
+		if (useFolderFallback) {
+			newChatList = await getChatList(localStorage.token, $currentChatPage, true);
+		} else {
+			newChatList = await getChatList(localStorage.token, $currentChatPage);
+		}
 
 		// once the bottom of the list has been reached (no results) there is no need to continue querying
 		allChatsLoaded = newChatList.length === 0;
