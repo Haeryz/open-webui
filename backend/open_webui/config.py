@@ -1204,6 +1204,52 @@ DEFAULT_PROMPT_SUGGESTIONS = PersistentConfig(
     default_prompt_suggestions,
 )
 
+DEFAULT_LEGAL_SYSTEM_PROMPT = (
+    "Anda adalah ahli hukum yang bertugas mengekstrak bagian '{field_name}' dari dokumen "
+    "putusan pengadilan.\n\n"
+    "INSTRUKSI:\n"
+    "1. Analisis semua chunk dokumen yang diberikan\n"
+    "2. Identifikasi bagian yang berisi '{field_name}'\n"
+    "3. Gunakan contoh format dari database sebagai referensi (jika relevan, sebutkan "
+    "[RAG_DB_EXAMPLE_X] yang Anda gunakan)\n"
+    "4. Ekstrak konten '{field_name}' dengan format yang bersih dan terstruktur\n"
+    "5. Pastikan hasil ekstraksi akurat, lengkap dan sesuai dengan format database\n"
+    "6. Preserve the original text as much as possible to get high ROUGE dan BLUE score "
+    "for evaluation EXCEPT TYPE AND PUNCTUATION IGNORE IT\n"
+    "7. If there is typo and punctuation u have to fix it in extraction\n\n"
+    "KONTEKS DOKUMEN:\n"
+    "{context_chunks}\n\n"
+    "{examples_section}\n\n"
+    "TUGAS: Ekstrak bagian '{field_name}' dari konteks dokumen di atas. Jika Anda "
+    "menggunakan contoh format dari database di atas, sebutkan [RAG_DB_EXAMPLE_X] mana "
+    "yang Anda gunakan sebagai referensi.\n\n"
+    "Hasil ekstraksi '{field_name}':"
+)
+
+DEFAULT_SYSTEM_PROMPT = PersistentConfig(
+    "DEFAULT_SYSTEM_PROMPT",
+    "ui.default_system_prompt",
+    os.environ.get("DEFAULT_SYSTEM_PROMPT", DEFAULT_LEGAL_SYSTEM_PROMPT),
+)
+
+try:
+    default_rag_collections_env = os.environ.get(
+        "DEFAULT_RAG_COLLECTIONS", '["LEGAL_RAG_TEST"]'
+    )
+    default_rag_collections = json.loads(default_rag_collections_env)
+    if isinstance(default_rag_collections, str):
+        default_rag_collections = [default_rag_collections]
+    if not isinstance(default_rag_collections, list):
+        raise ValueError
+except Exception:
+    default_rag_collections = ["LEGAL_RAG_TEST"]
+
+DEFAULT_RAG_COLLECTIONS = PersistentConfig(
+    "DEFAULT_RAG_COLLECTIONS",
+    "ui.default_rag_collections",
+    default_rag_collections,
+)
+
 MODEL_ORDER_LIST = PersistentConfig(
     "MODEL_ORDER_LIST",
     "ui.model_order_list",
@@ -2570,7 +2616,7 @@ PDF_EXTRACT_IMAGES = PersistentConfig(
 
 RAG_EMBEDDING_MODEL = PersistentConfig(
     "RAG_EMBEDDING_MODEL",
-    "rag.embedding_model",
+    "rag.embedding.model",
     os.environ.get("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
 )
 log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value}")

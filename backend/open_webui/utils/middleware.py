@@ -1,7 +1,6 @@
 import time
-import logging
-import sys
 import os
+import sys
 import base64
 import textwrap
 
@@ -12,6 +11,7 @@ import random
 import json
 import html
 import inspect
+import logging
 import re
 import ast
 
@@ -20,14 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 from fastapi import Request, HTTPException
-from fastapi.responses import HTMLResponse
-from starlette.responses import Response, StreamingResponse, JSONResponse
-
-
-from open_webui.models.oauth_sessions import OAuthSessions
-from open_webui.models.chats import Chats
-from open_webui.models.folders import Folders
-from open_webui.models.users import Users
+from fastapi.responses import HTMLResponse, StreamingResponse
 from open_webui.socket.main import (
     get_event_call,
     get_event_emitter,
@@ -67,6 +60,7 @@ from open_webui.utils.files import (
 from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
+from open_webui.models.chats import Chats
 
 from open_webui.retrieval.utils import get_sources_from_items
 
@@ -915,6 +909,9 @@ async def chat_completion_files_handler(
         log.debug(f"rag_contexts:sources: {sources}")
 
         unique_ids = set()
+        collection_names = set()
+        collection_details_map: dict[str, dict[str, Any]] = {}
+        total_documents = 0
         for source in sources or []:
             if not source or len(source.keys()) == 0:
                 continue
@@ -924,6 +921,7 @@ async def chat_completion_files_handler(
             src_info = source.get("source") or {}
 
             for index, _ in enumerate(documents):
+                total_documents += 1
                 metadata = metadatas[index] if index < len(metadatas) else None
                 _id = (
                     (metadata or {}).get("source")
@@ -932,13 +930,84 @@ async def chat_completion_files_handler(
                 )
                 unique_ids.add(_id)
 
+                if isinstance(metadata, dict):
+                    found_names: set[str] = set()
+
+                    def _normalize_to_list(value):
+                        if isinstance(value, str):
+                            return [value]
+                        if isinstance(value, (list, tuple, set)):
+                            return [item for item in value if isinstance(item, str)]
+                        return []
+
+                    for key in ["collection_name", "collection_names", "collections"]:
+                        for name in _normalize_to_list(metadata.get(key)):
+                            normalized = name.strip()
+                            if normalized:
+                                collection_names.add(normalized)
+                                found_names.add(normalized)
+
+                    if found_names:
+                        sanitized_metadata = {
+                            k: v
+                            for k, v in metadata.items()
+                            if k
+                            not in {
+                                "chunk",
+                                "chunk_id",
+                                "text",
+                                "content",
+                                "raw_content",
+                                "document",
+                                "document_text",
+                                "summary",
+                                "page_content",
+                            }
+                            and isinstance(v, (str, int, float, bool))
+                            and v is not None
+                        }
+
+                        for name in found_names:
+                            detail = collection_details_map.setdefault(
+                                name,
+                                {
+                                    "collection": name,
+                                    "documents": set(),
+                                    "metadata": {},
+                                },
+                            )
+
+                            if _id and _id != "N/A":
+                                detail["documents"].add(str(_id))
+
+                            if sanitized_metadata:
+                                for key, value in sanitized_metadata.items():
+                                    detail["metadata"].setdefault(key, value)
+
         sources_count = len(unique_ids)
+        if sources_count <= 1 and total_documents > sources_count:
+            sources_count = total_documents
+
+        collections_detail = [
+            {
+                "collection": name,
+                "documents": sorted(detail["documents"]),
+                "metadata": detail["metadata"],
+            }
+            for name, detail in sorted(collection_details_map.items())
+        ]
+
         await __event_emitter__(
             {
                 "type": "status",
                 "data": {
                     "action": "sources_retrieved",
                     "count": sources_count,
+                    "collections": sorted(collection_names),
+                    "documents": sorted(
+                        [doc_id for doc_id in unique_ids if doc_id and doc_id != "N/A"]
+                    ),
+                    "collections_detail": collections_detail,
                     "done": True,
                 },
             }
@@ -1006,6 +1075,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     log.debug(f"form_data: {form_data}")
 
     system_message = get_system_message(form_data.get("messages", []))
+
+    if not system_message:
+        default_system_prompt = getattr(
+            request.app.state.config, "DEFAULT_SYSTEM_PROMPT", None
+        )
+        if default_system_prompt:
+            form_data = apply_system_prompt_to_body(
+                default_system_prompt, form_data, metadata, user
+            )
+            system_message = get_system_message(form_data.get("messages", []))
+
     if system_message:  # Chat Controls/User Settings
         try:
             form_data = apply_system_prompt_to_body(
@@ -1173,7 +1253,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             )
 
     tool_ids = form_data.pop("tool_ids", None)
-    files = form_data.pop("files", None)
+    files = form_data.pop("files", None) or []
+    if not isinstance(files, list):
+        files = []
 
     prompt = get_last_user_message(form_data["messages"])
     # TODO: re-enable URL extraction from prompt
@@ -1182,9 +1264,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     #     urls = extract_urls(prompt)
 
     if files:
-        if not files:
-            files = []
-
         for file_item in files:
             if file_item.get("type", "file") == "folder":
                 # Get folder files
@@ -1195,8 +1274,44 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         files = [f for f in files if f.get("id", None) != folder_id]
                         files = [*files, *folder.data["files"]]
 
-        # files = [*files, *[{"type": "url", "url": url, "name": url} for url in urls]]
-        # Remove duplicate files based on their content
+    # files = [*files, *[{"type": "url", "url": url, "name": url} for url in urls]]
+    # Remove duplicate files based on their content
+    if files:
+        files = list({json.dumps(f, sort_keys=True): f for f in files}.values())
+
+    default_rag_collections = getattr(
+        request.app.state.config, "DEFAULT_RAG_COLLECTIONS", []
+    )
+    if default_rag_collections:
+        existing_collection_names = set()
+        for file_item in files:
+            if not isinstance(file_item, dict):
+                continue
+            if file_item.get("type") == "collection" and file_item.get("id"):
+                existing_collection_names.add(file_item["id"])
+            if isinstance(file_item.get("collection_names"), list):
+                existing_collection_names.update(file_item["collection_names"])
+            if file_item.get("collection_name"):
+                existing_collection_names.add(file_item["collection_name"])
+
+        for collection_name in default_rag_collections:
+            if (
+                not collection_name
+                or collection_name in existing_collection_names
+            ):
+                continue
+            files.append(
+                {
+                    "type": "collection",
+                    "collection_names": [collection_name],
+                    "legacy": True,
+                    "name": collection_name,
+                    "id": collection_name,
+                }
+            )
+            existing_collection_names.add(collection_name)
+
+    if files:
         files = list({json.dumps(f, sort_keys=True): f for f in files}.values())
 
     metadata = {

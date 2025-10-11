@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { createEventDispatcher, getContext } from 'svelte';
+	import { createEventDispatcher, getContext, onDestroy } from 'svelte';
 	const dispatch = createEventDispatcher();
-	const i18n = getContext('i18n');
+	const i18n = getContext<any>('i18n');
 
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import AdvancedParams from '../Settings/Advanced/AdvancedParams.svelte';
@@ -10,11 +10,26 @@
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 
 	import { user, settings } from '$lib/stores';
-	export let models = [];
-	export let chatFiles = [];
-	export let params = {};
+	export let models: any[] = [];
+	export let chatFiles: any[] = [];
+	export let params: any = {};
 
 	let showValves = false;
+	let defaultSystemPrompt = '';
+
+	$: void models;
+
+	const unsubscribeSettings = settings.subscribe(($settings) => {
+		defaultSystemPrompt = $settings?.system ?? '';
+	});
+
+	onDestroy(() => {
+		unsubscribeSettings();
+	});
+
+	$: if (params && params.system === undefined && defaultSystemPrompt) {
+		params = { ...params, system: defaultSystemPrompt };
+	}
 </script>
 
 <div class=" dark:text-white">

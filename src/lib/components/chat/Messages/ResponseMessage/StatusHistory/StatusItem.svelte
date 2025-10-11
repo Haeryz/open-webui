@@ -121,6 +121,47 @@
 						})}
 					{/if}
 				</div>
+
+				{#if status?.collections?.length}
+					<div class="text-xs text-gray-500 dark:text-gray-500 mt-1">
+						{$i18n.t('Collections')}: {status.collections.join(', ')}
+					</div>
+				{/if}
+
+				{#if status?.documents?.length}
+					<div class="text-xs text-gray-500 dark:text-gray-500 mt-0.5">
+						{$i18n.t('Documents')}: {status.documents.join(', ')}
+					</div>
+				{/if}
+
+				{#if status?.collections_detail?.length}
+					<div class="mt-1 space-y-1">
+						{#each status.collections_detail as item (item.collection)}
+							<div class="rounded-md bg-gray-50 dark:bg-gray-850 p-2 text-xs text-gray-600 dark:text-gray-400">
+								<div class="font-semibold text-gray-700 dark:text-gray-200">
+									{item.collection}
+								</div>
+								{#if item.documents?.length}
+									<div class="mt-0.5">
+										{$i18n.t('Documents')}: {item.documents.join(', ')}
+									</div>
+								{/if}
+								{#if Object.keys(item.metadata ?? {}).length}
+									<div class="mt-0.5 space-y-0.5">
+										{#each Object.entries(item.metadata ?? {}) as [key, value] (key)}
+											<div>
+												<span class="uppercase tracking-wide text-[10px] text-gray-400 dark:text-gray-500 mr-1">
+													{key}
+												</span>
+												<span class="text-gray-600 dark:text-gray-300">{String(value)}</span>
+											</div>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
 			</div>
 		{:else}
 			<div class="flex flex-col justify-center -space-y-0.5">

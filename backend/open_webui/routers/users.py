@@ -229,10 +229,35 @@ async def update_default_user_permissions(
 
 
 @router.get("/user/settings", response_model=Optional[UserSettings])
-async def get_user_settings_by_session_user(user=Depends(get_verified_user)):
+async def get_user_settings_by_session_user(
+    request: Request, user=Depends(get_verified_user)
+):
     user = Users.get_user_by_id(user.id)
     if user:
-        return user.settings
+        settings = user.settings
+        settings_ui = {}
+
+        if settings and isinstance(settings.ui, dict):
+            settings_ui = dict(settings.ui)
+
+        default_system_prompt = (
+            getattr(request.app.state.config, "DEFAULT_SYSTEM_PROMPT", None) or None
+        )
+
+        if default_system_prompt:
+            current_system_prompt = settings_ui.get("system")
+            if not current_system_prompt or not str(current_system_prompt).strip():
+                settings_ui["system"] = default_system_prompt
+                updated_user = Users.update_user_settings_by_id(
+                    user.id,
+                    {"ui": settings_ui},
+                )
+                if updated_user:
+                    settings = updated_user.settings
+                else:
+                    settings = UserSettings(ui=settings_ui)
+
+        return settings
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
