@@ -28,8 +28,10 @@ certificatesResolvers:
     acme:
       email: your-email@example.com
       storage: acme.json
+      caServer: https://acme-v02.api.letsencrypt.org/directory
       dnsChallenge:
         provider: cloudflare
+        delayBeforeCheck: 10
         resolvers:
           - "1.1.1.1:53"
           - "1.0.0.1:53"
