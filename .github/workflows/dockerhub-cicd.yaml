@@ -1,0 +1,205 @@
+name: CI/CD Pipeline - Build and Push to DockerHub
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+env:
+  DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/open-webui
+
+jobs:
+  # Job to determine version and prepare metadata
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if should build
+        id: check
+        run: |
+          echo "should_build=true" >> $GITHUB_OUTPUT
+
+      - name: Extract version from package.json
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(cat package.json | grep '"version"' | head -1 | awk -F: '{ print $2 }' | sed 's/[",]//g' | tr -d '[[:space:]]')
+            # Add commit hash for non-tag builds
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="${VERSION}-${SHORT_SHA}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+      - name: Prepare Docker metadata
+        id: meta
+        run: |
+          TAGS=""
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAGS="${{ env.IMAGE_NAME }}:latest,${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            TAGS="${{ env.IMAGE_NAME }}:dev,${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${{ steps.version.outputs.version }}
+            TAGS="${{ env.IMAGE_NAME }}:${VERSION},${{ env.IMAGE_NAME }}:latest"
+          fi
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
+  # Build and push main image (no special build args)
+  build-and-push:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: main
+            build_args: ""
+            suffix: ""
+          - name: cuda
+            build_args: "USE_CUDA=true"
+            suffix: "-cuda"
+          - name: ollama
+            build_args: "USE_OLLAMA=true"
+            suffix: "-ollama"
+          - name: slim
+            build_args: "USE_SLIM=true"
+            suffix: "-slim"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Prepare tags for variant
+        id: variant-tags
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          SUFFIX="${{ matrix.variant.suffix }}"
+          
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            if [ -z "$SUFFIX" ]; then
+              TAGS="${{ env.IMAGE_NAME }}:latest,${{ env.IMAGE_NAME }}:${VERSION}"
+            else
+              TAGS="${{ env.IMAGE_NAME }}:latest${SUFFIX},${{ env.IMAGE_NAME }}:${VERSION}${SUFFIX}"
+            fi
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            if [ -z "$SUFFIX" ]; then
+              TAGS="${{ env.IMAGE_NAME }}:dev,${{ env.IMAGE_NAME }}:${VERSION}"
+            else
+              TAGS="${{ env.IMAGE_NAME }}:dev${SUFFIX},${{ env.IMAGE_NAME }}:${VERSION}${SUFFIX}"
+            fi
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            if [ -z "$SUFFIX" ]; then
+              TAGS="${{ env.IMAGE_NAME }}:${VERSION},${{ env.IMAGE_NAME }}:latest"
+            else
+              TAGS="${{ env.IMAGE_NAME }}:${VERSION}${SUFFIX},${{ env.IMAGE_NAME }}:latest${SUFFIX}"
+            fi
+          fi
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: ${{ steps.variant-tags.outputs.tags }}
+
+      - name: Build and push Docker image - ${{ matrix.variant.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.variant-tags.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_HASH=${{ github.sha }}
+            ${{ matrix.variant.build_args }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.variant.name }}
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.variant.name }},mode=max
+
+  # Create GitHub release for version tags
+  create-release:
+    needs: [prepare, build-and-push]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: |
+            ## Docker Images Released
+            
+            🐳 DockerHub Images:
+            - `${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}`
+            - `${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}-cuda`
+            - `${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}-ollama`
+            - `${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}-slim`
+            - `${{ env.IMAGE_NAME }}:latest`
+            
+            ### Usage
+            ```bash
+            docker pull ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}
+            ```
+            
+            ### Changes
+            See commit history for details.
+          draft: false
+          prerelease: false
+
+  # Notification job
+  notify:
+    needs: [prepare, build-and-push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Status
+        run: |
+          if [ "${{ needs.build-and-push.result }}" == "success" ]; then
+            echo "✅ Build and Push completed successfully!"
+            echo "🐳 Images pushed to DockerHub: ${{ env.IMAGE_NAME }}"
+            echo "📦 Version: ${{ needs.prepare.outputs.version }}"
+          else
+            echo "❌ Build failed!"
+            exit 1
+          fi
