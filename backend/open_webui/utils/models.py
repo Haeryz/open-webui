@@ -326,7 +326,8 @@ def check_model_access(user, model):
     else:
         model_info = Models.get_model_by_id(model.get("id"))
         if not model_info:
-            raise Exception("Model not found")
+            # Base models without a custom record are globally accessible by default
+            return
         elif not (
             user.id == model_info.user_id
             or has_access(
@@ -356,17 +357,20 @@ def get_filtered_models(models, user):
                 continue
 
             model_info = Models.get_model_by_id(model["id"])
-            if model_info:
-                if (
-                    (user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
-                    or user.id == model_info.user_id
-                    or has_access(
-                        user.id,
-                        type="read",
-                        access_control=model_info.access_control,
-                    )
-                ):
-                    filtered_models.append(model)
+            if not model_info:
+                filtered_models.append(model)
+                continue
+
+            if (
+                (user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
+                or user.id == model_info.user_id
+                or has_access(
+                    user.id,
+                    type="read",
+                    access_control=model_info.access_control,
+                )
+            ):
+                filtered_models.append(model)
 
         return filtered_models
     else:

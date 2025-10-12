@@ -49,6 +49,7 @@ from open_webui.utils.misc import (
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access
+from open_webui.utils.models import check_model_access
 
 
 log = logging.getLogger(__name__)
@@ -910,13 +911,6 @@ async def generate_chat_completion(
                     status_code=403,
                     detail="Model not found",
                 )
-    elif not bypass_filter:
-        if user.role != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail="Model not found",
-            )
-
     await get_all_models(request, user=user)
     model = request.app.state.OPENAI_MODELS.get(model_id)
     if model:
@@ -926,6 +920,15 @@ async def generate_chat_completion(
             status_code=404,
             detail="Model not found",
         )
+
+    if not bypass_filter:
+        try:
+            check_model_access(user, model)
+        except Exception:
+            raise HTTPException(
+                status_code=403,
+                detail="Model not found",
+            )
 
     # Get the API config for the model
     api_config = request.app.state.config.OPENAI_API_CONFIGS.get(
