@@ -136,7 +136,7 @@ def stream_json_response_as_sse(
                     break
 
                 buffer = buffer[idx:]
-                yield f"data: {json.dumps(obj, separators=(",", ":"))}\n\n"
+                yield f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
 
         buffer = buffer.lstrip()
         if buffer:
@@ -153,7 +153,7 @@ def stream_json_response_as_sse(
                         buffer if len(buffer) < 200 else f"{buffer[:200]}...",
                     )
                 else:
-                    yield f"data: {json.dumps(obj, separators=(",", ":"))}\n\n"
+                    yield f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
                     buffer = buffer[idx:].lstrip()
                     if buffer.startswith("[DONE]") and not done_sent:
                         yield "data: [DONE]\n\n"
