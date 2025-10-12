@@ -204,7 +204,7 @@ class ModelsTable:
             ]
 
     def get_models_by_user_id(
-        self, user_id: str, permission: str = "write"
+        self, user_id: str, permission: str = "read"
     ) -> list[ModelUserResponse]:
         models = self.get_models()
         user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user_id)}
