@@ -158,7 +158,7 @@ def save_config(config):
 T = TypeVar("T")
 
 ENABLE_PERSISTENT_CONFIG = (
-    os.environ.get("ENABLE_PERSISTENT_CONFIG", "True").lower() == "true"
+    os.environ.get("ENABLE_PERSISTENT_CONFIG", "False").lower() == "false"
 )
 
 
@@ -1320,6 +1320,9 @@ DEFAULT_SYSTEM_PROMPT = PersistentConfig(
     "ui.default_system_prompt",
     os.environ.get("DEFAULT_SYSTEM_PROMPT", DEFAULT_LEGAL_SYSTEM_PROMPT),
 )
+
+# Debug logging to verify the prompt being used
+log.info(f"DEFAULT_SYSTEM_PROMPT initialized. First 100 chars: {DEFAULT_SYSTEM_PROMPT.value[:100]}")
 
 try:
     default_rag_collections_env = os.environ.get(
