@@ -1,6 +1,9 @@
 import logging
+import math
 import os
-from typing import Optional, Union
+from functools import lru_cache
+from types import SimpleNamespace
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import requests
 import hashlib
@@ -10,11 +13,36 @@ import re
 
 from urllib.parse import quote
 from huggingface_hub import snapshot_download
+
+try:  # pragma: no cover - optional dependency
+    from qdrant_client import QdrantClient as ExternalQdrantClient
+except ImportError:  # pragma: no cover - optional dependency
+    ExternalQdrantClient = None
+
+try:  # pragma: no cover - optional dependency
+    from qdrant_client.http import models as qdrant_models
+except ImportError:  # pragma: no cover - optional dependency
+    qdrant_models = None
+
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from langchain_core.retrievers import BaseRetriever
 
-from open_webui.config import VECTOR_DB
+from open_webui.config import (
+    LEGAL_RAG_BASE_FIELDS,
+    LEGAL_RAG_COLLECTION,
+    LEGAL_RAG_DEFAULT_FEATURE_KEYS,
+    LEGAL_RAG_MAX_RESULTS,
+    QDRANT_API_KEY,
+    QDRANT_TIMEOUT,
+    QDRANT_URI,
+    RAG_EMBEDDING_CONTENT_PREFIX,
+    RAG_EMBEDDING_PREFIX_FIELD_NAME,
+    RAG_EMBEDDING_QUERY_PREFIX,
+    VECTOR_DB,
+)
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 
@@ -38,21 +66,472 @@ from open_webui.env import (
     OFFLINE_MODE,
     ENABLE_FORWARD_USER_INFO_HEADERS,
 )
-from open_webui.config import (
-    RAG_EMBEDDING_QUERY_PREFIX,
-    RAG_EMBEDDING_CONTENT_PREFIX,
-    RAG_EMBEDDING_PREFIX_FIELD_NAME,
-)
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
 
 
-from typing import Any
+def _normalize_text(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", value).strip().lower()
 
-from langchain_core.callbacks import CallbackManagerForRetrieverRun
-from langchain_core.retrievers import BaseRetriever
 
+def _invoke_embedding(embedding_function, text, prefix=None, user=None):
+    if embedding_function is None:
+        return None
+    return embedding_function(text, prefix, user)
+
+
+def _convert_embedding(value) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        try:
+            return [float(v) for v in value]
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return []
+    if hasattr(value, "tolist"):
+        try:
+            return [float(v) for v in value.tolist()]
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return []
+    try:
+        return [float(v) for v in value]
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return []
+
+
+def _convert_embeddings(value) -> list[list[float]]:
+    embeddings: list[list[float]] = []
+    if value is None:
+        return embeddings
+    if isinstance(value, list):
+        for item in value:
+            converted = _convert_embedding(item)
+            if converted:
+                embeddings.append(converted)
+    else:
+        converted = _convert_embedding(value)
+        if converted:
+            embeddings.append(converted)
+    return embeddings
+
+
+def _normalize_vector(vector: Sequence[float]) -> list[float]:
+    if not vector:
+        return []
+    norm = math.sqrt(sum(v * v for v in vector))
+    if not norm:
+        return [float(v) for v in vector]
+    return [float(v) / norm for v in vector]
+
+
+def _average_vectors(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    length = len(vectors[0])
+    totals = [0.0] * length
+    count = 0
+    for vector in vectors:
+        if len(vector) != length:
+            continue
+        totals = [a + b for a, b in zip(totals, vector)]
+        count += 1
+    if not count:
+        return []
+    return [value / count for value in totals]
+
+
+def _cosine_scores(vectors: list[list[float]], reference: list[float]) -> list[float]:
+    if not vectors or not reference:
+        return []
+    reference_vector = _normalize_vector(reference)
+    scores: list[float] = []
+    for vector in vectors:
+        normalized = _normalize_vector(vector)
+        if not normalized or len(normalized) != len(reference_vector):
+            scores.append(0.0)
+            continue
+        scores.append(sum(a * b for a, b in zip(normalized, reference_vector)))
+    return scores
+
+
+def _extract_vector_from_scored_point(point) -> list[float]:
+    if point is None:
+        return []
+    vector = getattr(point, "vector", None)
+    if vector is None and getattr(point, "payload", None):
+        vector = point.payload.get("vector")
+    if isinstance(vector, dict):
+        for value in vector.values():
+            converted = _convert_embedding(value)
+            if converted:
+                return converted
+        return []
+    return _convert_embedding(vector)
+
+
+def _normalize_scored_point(point, default_score: float = 0.0):
+    if point is None:
+        return None
+    if isinstance(point, SimpleNamespace):
+        return point
+    payload = getattr(point, "payload", None)
+    vector = getattr(point, "vector", None)
+    score = getattr(point, "score", default_score)
+    identifier = getattr(point, "id", None)
+    if payload is None and isinstance(point, dict):
+        payload = point.get("payload")
+        vector = point.get("vector")
+        score = point.get("score", default_score)
+        identifier = point.get("id")
+    if payload is None:
+        payload = {}
+    return SimpleNamespace(id=identifier, payload=payload, vector=vector, score=score)
+
+
+@lru_cache(maxsize=1)
+def _get_legal_qdrant_client():
+    if not LEGAL_RAG_COLLECTION:
+        return None
+    if ExternalQdrantClient is None:
+        return None
+    if not QDRANT_URI:
+        return None
+    try:
+        return ExternalQdrantClient(
+            url=QDRANT_URI,
+            api_key=QDRANT_API_KEY or None,
+            timeout=QDRANT_TIMEOUT,
+        )
+    except Exception as exc:  # pragma: no cover - network dependent
+        log.debug(f"Unable to initialize legal Qdrant client: {exc}")
+        return None
+
+
+@lru_cache(maxsize=1)
+def _legal_feature_aliases() -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    keys = list(LEGAL_RAG_DEFAULT_FEATURE_KEYS)
+    client = _get_legal_qdrant_client()
+    if client:
+        try:
+            points, _ = client.scroll(
+                LEGAL_RAG_COLLECTION,
+                limit=1,
+                with_payload=True,
+            )
+            for raw_point in points or []:
+                payload = getattr(raw_point, "payload", {}) or {}
+                for key in payload.keys():
+                    if key in LEGAL_RAG_BASE_FIELDS:
+                        continue
+                    if key not in keys:
+                        keys.append(key)
+        except Exception as exc:  # pragma: no cover - network dependent
+            log.debug(f"Unable to introspect legal features: {exc}")
+
+    for key in keys:
+        normalized = _normalize_text(key)
+        if not normalized:
+            continue
+        aliases.setdefault(normalized, key)
+        alias_with_spaces = _normalize_text(key.replace("_", " "))
+        if alias_with_spaces:
+            aliases.setdefault(alias_with_spaces, key)
+        aliases.setdefault(_normalize_text(key.upper()), key)
+    return aliases
+
+
+def _detect_legal_features(queries: list[str]) -> set[str]:
+    aliases = _legal_feature_aliases()
+    detected: set[str] = set()
+    for query in queries or []:
+        normalized_query = _normalize_text(query)
+        if not normalized_query:
+            continue
+        for alias, key in aliases.items():
+            if alias and alias in normalized_query:
+                detected.add(key)
+    return detected
+
+
+def _embed_texts(embedding_function, texts: list[str], user=None) -> list[list[float]]:
+    if not texts:
+        return []
+    embeddings = _invoke_embedding(
+        embedding_function,
+        texts,
+        prefix=RAG_EMBEDDING_CONTENT_PREFIX,
+        user=user,
+    )
+    return _convert_embeddings(embeddings)
+
+
+def _legal_feature_contexts(
+    queries: list[str],
+    embedding_function,
+    user,
+    max_results: int,
+) -> Tuple[list[dict], list[float]]:
+    client = _get_legal_qdrant_client()
+    if not client or not queries or embedding_function is None:
+        return [], []
+
+    alias_map = _legal_feature_aliases()
+    requested_features = _detect_legal_features(queries)
+    canonical_requested_features = list(
+        dict.fromkeys(
+            alias_map.get(_normalize_text(feature), feature)
+            for feature in requested_features
+        )
+    )
+    search_texts: list[str] = []
+    seen_texts: set[str] = set()
+
+    for query in queries:
+        if not query:
+            continue
+        normalized_query = query.strip()
+        if not normalized_query:
+            continue
+        if normalized_query not in seen_texts:
+            search_texts.append(normalized_query)
+            seen_texts.add(normalized_query)
+        for feature in canonical_requested_features:
+            if not feature:
+                continue
+            feature_phrase = feature.replace("_", " ")
+            if feature_phrase.lower() in normalized_query.lower():
+                continue
+            combined_query = f"{normalized_query} {feature_phrase}".strip()
+            if combined_query and combined_query not in seen_texts:
+                search_texts.append(combined_query)
+                seen_texts.add(combined_query)
+
+    for feature in canonical_requested_features:
+        if not feature:
+            continue
+        feature_phrase = feature.replace("_", " ")
+        if feature_phrase and feature_phrase not in seen_texts:
+            search_texts.append(feature_phrase)
+            seen_texts.add(feature_phrase)
+
+    if not search_texts:
+        search_texts = [query for query in queries if query]
+
+    query_vectors: list[list[float]] = []
+    for query in search_texts:
+        try:
+            vector = _invoke_embedding(
+                embedding_function,
+                query,
+                prefix=RAG_EMBEDDING_QUERY_PREFIX,
+                user=user,
+            )
+            vector = _convert_embedding(vector)
+            if vector:
+                query_vectors.append(_normalize_vector(vector))
+        except Exception as exc:  # pragma: no cover - embedding dependent
+            log.debug(f"Failed to encode legal feature query '{query}': {exc}")
+
+    def _collect_from_scroll(
+        limit: int,
+    ) -> tuple[list[Any], bool]:
+        points: list[Any] = []
+        next_offset = None
+        while len(points) < limit:
+            kwargs = {
+                "collection_name": LEGAL_RAG_COLLECTION,
+                "with_payload": True,
+                "with_vectors": False,
+                "limit": min(256, limit - len(points)),
+            }
+            if next_offset is not None:
+                kwargs["offset"] = next_offset
+            try:
+                result = client.scroll(**kwargs)
+            except Exception as exc:  # pragma: no cover - backend dependent
+                log.debug(f"Legal feature scroll failed: {exc}")
+                break
+
+            if isinstance(result, tuple):
+                batch, next_offset = result
+            else:  # pragma: no cover - fallback for legacy client
+                batch, next_offset = result, None
+
+            if not batch:
+                break
+
+            for point in batch:
+                normalized_point = _normalize_scored_point(point, default_score=1.0)
+                if not normalized_point:
+                    continue
+                points.append(normalized_point)
+                if len(points) >= limit:
+                    break
+
+            if not next_offset:
+                break
+        return points, True
+
+    collected_points: list[Any] = []
+    search_limit = max_results
+    if query_vectors:
+        for vector in query_vectors:
+            try:
+                result = client.search(
+                    collection_name=LEGAL_RAG_COLLECTION,
+                    query_vector=vector,
+                    limit=search_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                for point in result or []:
+                    normalized_point = _normalize_scored_point(point)
+                    if normalized_point:
+                        collected_points.append(normalized_point)
+            except Exception as exc:  # pragma: no cover - backend dependent
+                log.debug(f"Legal feature vector search failed: {exc}")
+
+    if len(collected_points) < search_limit:
+        scroll_points, _ = _collect_from_scroll(
+            limit=search_limit - len(collected_points),
+        )
+        collected_points.extend(scroll_points)
+
+    if not collected_points:
+        return [], []
+    collected_points.sort(key=lambda sp: sp.score or 0.0, reverse=True)
+
+    contexts: list[dict] = []
+    vectors: list[list[float]] = []
+    seen_ids: set[str] = set()
+
+    for point in collected_points:
+        point_id = str(point.id)
+        if point_id in seen_ids:
+            continue
+        seen_ids.add(point_id)
+
+        payload = point.payload or {}
+        score = float(point.score) if point.score is not None else 0.0
+        extracted_vector = _normalize_vector(_extract_vector_from_scored_point(point))
+
+        nomor_putusan = payload.get("nomor_putusan")
+        file_name = payload.get("file_name")
+        document_id = payload.get("document_id")
+
+        payload_key_map = {
+            _normalize_text(key): key
+            for key in (payload.keys() if payload else [])
+            if isinstance(key, str)
+        }
+
+        def _canonicalize_feature(raw: str) -> str:
+            normalized = _normalize_text(raw)
+            return alias_map.get(normalized, raw)
+
+        extracted_items: list[tuple[str, str]] = []
+        seen_features_for_point: set[str] = set()
+
+        if canonical_requested_features:
+            for feature in canonical_requested_features:
+                normalized_feature = _normalize_text(feature)
+                payload_key = payload_key_map.get(normalized_feature)
+                if not payload_key and " " in feature:
+                    payload_key = payload_key_map.get(
+                        _normalize_text(feature.replace(" ", "_"))
+                    )
+                if not payload_key and "_" in feature:
+                    payload_key = payload_key_map.get(
+                        _normalize_text(feature.replace("_", " "))
+                    )
+                if not payload_key:
+                    continue
+                value = payload.get(payload_key)
+                if not value:
+                    continue
+                content = str(value).strip()
+                if not content:
+                    continue
+                canonical_feature = _canonicalize_feature(feature)
+                if canonical_feature in seen_features_for_point:
+                    continue
+                seen_features_for_point.add(canonical_feature)
+                extracted_items.append((canonical_feature, content))
+
+        if not extracted_items:
+            fallback_value = (payload.get("column_value") or "").strip()
+            if fallback_value:
+                raw_feature = payload.get("source_column") or ""
+                canonical_feature = _canonicalize_feature(raw_feature or "legal")
+                if canonical_feature not in seen_features_for_point:
+                    seen_features_for_point.add(canonical_feature)
+                    extracted_items.append((canonical_feature, fallback_value))
+
+        for canonical_feature, content in extracted_items:
+            display_name = f"Legal DB • {canonical_feature.replace('_', ' ').title()}"
+            if nomor_putusan:
+                display_name += f" • {nomor_putusan}"
+            elif file_name:
+                display_name += f" • {file_name}"
+
+            context_vector: list[float] = []
+            if extracted_vector:
+                context_vector = extracted_vector
+            elif embedding_function is not None:
+                try:
+                    embedded = _invoke_embedding(
+                        embedding_function,
+                        content,
+                        prefix=RAG_EMBEDDING_CONTENT_PREFIX,
+                        user=user,
+                    )
+                    context_vector = _normalize_vector(
+                        _convert_embedding(embedded)
+                    )
+                except Exception as exc:  # pragma: no cover - embedding dependent
+                    log.debug(f"Failed to embed legal context content: {exc}")
+
+            if context_vector:
+                vectors.append(context_vector)
+
+            metadata = {
+                "source": nomor_putusan or file_name or canonical_feature,
+                "collection_name": LEGAL_RAG_COLLECTION,
+                "feature": canonical_feature,
+                "file_name": file_name,
+                "nomor_putusan": nomor_putusan,
+                "document_id": document_id,
+                "score": score,
+                "name": display_name,
+            }
+
+            contexts.append(
+                {
+                    "source": {
+                        "type": "legal_feature",
+                        "id": f"{LEGAL_RAG_COLLECTION}:{document_id}:{canonical_feature}",
+                        "name": display_name,
+                        "collection": LEGAL_RAG_COLLECTION,
+                        "feature": canonical_feature,
+                    },
+                    "document": [content],
+                    "metadata": [metadata],
+                    "distances": [[score]],
+                }
+            )
+
+            if len(contexts) >= max_results:
+                break
+
+        if len(contexts) >= max_results:
+            break
+
+    aggregated_vector = _average_vectors(vectors)
+    return contexts, aggregated_vector
 
 def is_youtube_url(url: str) -> bool:
     youtube_regex = r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$"
@@ -764,6 +1243,75 @@ def get_sources_from_items(
             query_results.append({**query_result, "file": item})
 
     sources = []
+    legal_sources: list[dict] = []
+    aggregated_feature_vector: list[float] = []
+
+    if LEGAL_RAG_COLLECTION:
+        try:
+            max_results = LEGAL_RAG_MAX_RESULTS
+            if isinstance(k, int) and k > 0:
+                max_results = min(LEGAL_RAG_MAX_RESULTS, k)
+
+            legal_sources, aggregated_feature_vector = _legal_feature_contexts(
+                queries=queries,
+                embedding_function=embedding_function,
+                user=user,
+                max_results=max_results,
+            )
+        except Exception as exc:
+            log.debug(f"Legal context retrieval failed: {exc}")
+            legal_sources = []
+            aggregated_feature_vector = []
+
+    if aggregated_feature_vector:
+        for query_result in query_results:
+            documents_list = query_result.get("documents") or []
+            metadatas_list = query_result.get("metadatas") or []
+
+            if not documents_list or not documents_list[0]:
+                continue
+
+            documents = documents_list[0]
+            metadata_entries = metadatas_list[0] if metadatas_list else []
+
+            try:
+                embeddings = _embed_texts(
+                    embedding_function,
+                    documents,
+                    user=user,
+                )
+            except Exception as exc:
+                log.debug(f"Failed to embed documents for re-ranking: {exc}")
+                continue
+
+            if not embeddings:
+                continue
+
+            scores = _cosine_scores(embeddings, aggregated_feature_vector)
+
+            combined = []
+            for idx, (score, document) in enumerate(zip(scores, documents)):
+                metadata = (
+                    metadata_entries[idx]
+                    if idx < len(metadata_entries)
+                    else metadata_entries[-1]
+                    if metadata_entries
+                    else {}
+                )
+                combined.append((score, document, metadata))
+
+            combined.sort(key=lambda item: item[0], reverse=True)
+            if isinstance(k, int) and k > 0:
+                combined = combined[:k]
+
+            if not combined:
+                continue
+
+            query_result["documents"] = [[item[1] for item in combined]]
+            query_result["metadatas"] = [[item[2] for item in combined]]
+            query_result["distances"] = [[float(item[0]) for item in combined]]
+
+    sources.extend(legal_sources)
     for query_result in query_results:
         try:
             if "documents" in query_result:
@@ -1017,7 +1565,6 @@ def generate_embeddings(
 
 
 import operator
-from typing import Optional, Sequence
 
 from langchain_core.callbacks import Callbacks
 from langchain_core.documents import BaseDocumentCompressor, Document

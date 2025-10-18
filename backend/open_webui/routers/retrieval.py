@@ -1233,6 +1233,33 @@ async def update_rag_config(
 ####################################
 
 
+DEFAULT_CHUNK_WORD_COUNT = 3000
+
+
+def chunk_text_by_words(text: str, chunk_size: int = DEFAULT_CHUNK_WORD_COUNT) -> List[str]:
+    """Split text into chunks of up to chunk_size words while preserving spacing."""
+    if not text:
+        return []
+
+    chunks: List[str] = []
+    buffer: list[str] = []
+    word_count = 0
+
+    for match in re.finditer(r"\S+\s*", text):
+        buffer.append(match.group())
+        word_count += 1
+
+        if word_count >= chunk_size:
+            chunks.append("".join(buffer).strip())
+            buffer.clear()
+            word_count = 0
+
+    if buffer:
+        chunks.append("".join(buffer).strip())
+
+    return chunks
+
+
 def save_docs_to_vector_db(
     request: Request,
     docs,
@@ -1593,10 +1620,11 @@ def process_file(
                     ]
                 text_content = " ".join([doc.page_content for doc in docs])
 
+            text_chunks = chunk_text_by_words(text_content)
             log.debug(f"text_content: {text_content}")
             Files.update_file_data_by_id(
                 file.id,
-                {"content": text_content},
+                {"content": text_content, "chunks": text_chunks},
             )
             hash = calculate_sha256_string(text_content)
             Files.update_file_hash_by_id(file.id, hash)
@@ -1608,6 +1636,7 @@ def process_file(
                     "collection_name": None,
                     "filename": file.filename,
                     "content": text_content,
+                    "chunks": text_chunks,
                 }
             else:
                 try:
@@ -1643,6 +1672,7 @@ def process_file(
                             "collection_name": collection_name,
                             "filename": file.filename,
                             "content": text_content,
+                            "chunks": text_chunks,
                         }
                     else:
                         raise Exception("Error saving document to vector database")
@@ -2418,7 +2448,10 @@ def process_files_batch(
 
             hash = calculate_sha256_string(text_content)
             Files.update_file_hash_by_id(file.id, hash)
-            Files.update_file_data_by_id(file.id, {"content": text_content})
+            text_chunks = chunk_text_by_words(text_content)
+            Files.update_file_data_by_id(
+                file.id, {"content": text_content, "chunks": text_chunks}
+            )
 
             all_docs.extend(docs)
             results.append(BatchProcessFilesResult(file_id=file.id, status="prepared"))

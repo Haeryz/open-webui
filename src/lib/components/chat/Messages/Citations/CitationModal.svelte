@@ -56,6 +56,15 @@
 			return str;
 		}
 	};
+
+	const formatFeatureName = (feature?: string) => {
+		if (!feature) return '';
+		return feature
+			.split(/[_\s]+/)
+			.filter(Boolean)
+			.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+			.join(' ');
+	};
 </script>
 
 <Modal size="lg" bind:show>
@@ -108,6 +117,23 @@
 			>
 				{#each mergedDocuments as document, documentIdx}
 					<div class="flex flex-col w-full gap-2">
+						{#if document.metadata?.collection_name || document.metadata?.feature || document.metadata?.nomor_putusan || document.metadata?.file_name}
+							<div class="text-xs text-gray-500 dark:text-gray-400 flex flex-wrap gap-2">
+								{#if document.metadata?.collection_name}
+									<span class="font-medium">
+										{document.metadata.collection_name}
+									</span>
+								{/if}
+								{#if document.metadata?.feature}
+									<span>{formatFeatureName(document.metadata.feature)}</span>
+								{/if}
+								{#if document.metadata?.nomor_putusan}
+									<span>{document.metadata.nomor_putusan}</span>
+								{:else if document.metadata?.file_name}
+									<span>{document.metadata.file_name}</span>
+								{/if}
+							</div>
+						{/if}
 						{#if document.metadata?.parameters}
 							<div>
 								<div class="text-sm font-medium dark:text-gray-300 mb-1">

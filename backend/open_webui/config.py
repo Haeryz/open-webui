@@ -1342,6 +1342,48 @@ DEFAULT_RAG_COLLECTIONS = PersistentConfig(
     default_rag_collections,
 )
 
+LEGAL_RAG_COLLECTION = os.environ.get("LEGAL_RAG_COLLECTION")
+if not LEGAL_RAG_COLLECTION:
+    if isinstance(default_rag_collections, list) and default_rag_collections:
+        LEGAL_RAG_COLLECTION = default_rag_collections[0]
+    else:
+        LEGAL_RAG_COLLECTION = None
+
+LEGAL_RAG_MAX_RESULTS = int(os.environ.get("LEGAL_RAG_MAX_RESULTS", "6"))
+
+try:
+    legal_feature_keys_env = os.environ.get("LEGAL_RAG_FEATURE_KEYS", "")
+    if legal_feature_keys_env:
+        legal_feature_keys = json.loads(legal_feature_keys_env)
+        if isinstance(legal_feature_keys, str):
+            legal_feature_keys = [legal_feature_keys]
+        if not isinstance(legal_feature_keys, list):
+            raise ValueError
+    else:
+        legal_feature_keys = []
+except Exception:
+    legal_feature_keys = []
+
+if not legal_feature_keys:
+    legal_feature_keys = [
+        "amar_putusan",
+        "pertimbangan_hukum",
+        "pertimbangan_hakim",
+        "identitas_terdakwa",
+        "riwayat_perkara",
+    ]
+
+LEGAL_RAG_DEFAULT_FEATURE_KEYS = legal_feature_keys
+LEGAL_RAG_BASE_FIELDS = {
+    "column_value",
+    "source_column",
+    "nomor_putusan",
+    "file_name",
+    "document_id",
+    "vector",
+    "score",
+}
+
 MODEL_ORDER_LIST = PersistentConfig(
     "MODEL_ORDER_LIST",
     "ui.model_order_list",

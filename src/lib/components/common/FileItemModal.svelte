@@ -26,6 +26,8 @@
 	let loading = false;
 
 	let selectedTab = '';
+	let chunks: string[] = [];
+	let hasChunks = false;
 
 	$: isPDF =
 		item?.meta?.content_type === 'application/pdf' ||
@@ -38,6 +40,12 @@
 		(item?.name && item?.name.toLowerCase().endsWith('.ogg')) ||
 		(item?.name && item?.name.toLowerCase().endsWith('.m4a')) ||
 		(item?.name && item?.name.toLowerCase().endsWith('.webm'));
+
+	$: chunks = item?.file?.data?.chunks ?? [];
+	$: hasChunks = chunks.length > 0;
+	$: if (!hasChunks && selectedTab === 'chunks') {
+		selectedTab = '';
+	}
 
 	const loadContent = async () => {
 		if (item?.type === 'collection') {
@@ -217,6 +225,18 @@
 							}}>{$i18n.t('Content')}</button
 						>
 
+						{#if hasChunks}
+							<button
+								class="min-w-fit py-1.5 px-4 border-b {selectedTab === 'chunks'
+									? ' '
+									: ' border-transparent text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
+								type="button"
+								on:click={() => {
+									selectedTab = 'chunks';
+								}}>{$i18n.t('Chunks')}</button
+							>
+						{/if}
+
 						<button
 							class="min-w-fit py-1.5 px-4 border-b {selectedTab === 'preview'
 								? ' '
@@ -228,12 +248,23 @@
 						>
 					</div>
 
-					{#if selectedTab === 'preview'}
+						{#if selectedTab === 'preview'}
 						<iframe
 							title={item?.name}
 							src={`${WEBUI_API_BASE_URL}/files/${item.id}/content`}
 							class="w-full h-[70vh] border-0 rounded-lg"
 						/>
+						{:else if selectedTab === 'chunks'}
+							<div class="flex flex-col gap-3 max-h-96 overflow-scroll scrollbar-hidden text-xs">
+								{#each chunks as chunk, index}
+									<div class="border border-gray-100 dark:border-gray-800 rounded-md p-3 bg-gray-50 dark:bg-gray-900/40">
+										<div class="uppercase tracking-wide text-[10px] text-gray-500 dark:text-gray-400 mb-2">
+											{$i18n.t('Chunk {{INDEX}}', { INDEX: index + 1 })}
+										</div>
+										<pre class="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-gray-700 dark:text-gray-200">{chunk.trim() || 'No content'}</pre>
+									</div>
+								{/each}
+							</div>
 					{:else}
 						<div class="max-h-96 overflow-scroll scrollbar-hidden text-xs whitespace-pre-wrap">
 							{(item?.file?.data?.content ?? '').trim() || 'No content'}
