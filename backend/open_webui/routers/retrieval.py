@@ -4,6 +4,7 @@ import mimetypes
 import os
 import shutil
 import asyncio
+import copy
 
 import re
 import uuid
@@ -112,6 +113,8 @@ from open_webui.constants import ERROR_MESSAGES
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
 
+QUANTIZED_EMBEDDING_MODELS = {"intfloat/multilingual-e5-large"}
+
 ##########################################
 #
 # Utility functions
@@ -128,16 +131,63 @@ def get_ef(
     if embedding_model and engine == "":
         from sentence_transformers import SentenceTransformer
 
-        try:
-            ef = SentenceTransformer(
+        base_model_kwargs = (
+            copy.deepcopy(SENTENCE_TRANSFORMERS_MODEL_KWARGS)
+            if isinstance(SENTENCE_TRANSFORMERS_MODEL_KWARGS, dict)
+            else {}
+        )
+
+        enable_quantization = embedding_model in QUANTIZED_EMBEDDING_MODELS
+        attempted_quantization = False
+
+        quantized_model_kwargs = base_model_kwargs.copy()
+        if enable_quantization:
+            try:
+                from transformers import BitsAndBytesConfig
+                import torch
+
+                quant_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=getattr(torch, "bfloat16", torch.float16),
+                )
+                quantized_model_kwargs["quantization_config"] = quant_config
+                quantized_model_kwargs.setdefault("device_map", "auto")
+                attempted_quantization = True
+            except Exception as quant_error:
+                log.warning(
+                    "Unable to enable 4-bit quantization for embedding model '%s': %s. Falling back to standard precision.",
+                    embedding_model,
+                    quant_error,
+                )
+                enable_quantization = False
+
+        def _load_sentence_transformer(model_kwargs: dict):
+            return SentenceTransformer(
                 get_model_path(embedding_model, auto_update),
                 device=DEVICE_TYPE,
                 trust_remote_code=RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
                 backend=SENTENCE_TRANSFORMERS_BACKEND,
-                model_kwargs=SENTENCE_TRANSFORMERS_MODEL_KWARGS,
+                model_kwargs=model_kwargs or None,
             )
-        except Exception as e:
-            log.debug(f"Error loading SentenceTransformer: {e}")
+
+        try:
+            model_kwargs_to_use = quantized_model_kwargs if enable_quantization else base_model_kwargs
+            ef = _load_sentence_transformer(model_kwargs_to_use)
+        except Exception as load_error:
+            if enable_quantization and attempted_quantization:
+                log.warning(
+                    "Failed to load embedding model '%s' with 4-bit quantization (%s). Retrying without quantization.",
+                    embedding_model,
+                    load_error,
+                )
+                try:
+                    ef = _load_sentence_transformer(base_model_kwargs)
+                except Exception as final_error:
+                    log.debug(f"Error loading SentenceTransformer: {final_error}")
+            else:
+                log.debug(f"Error loading SentenceTransformer: {load_error}")
 
     return ef
 
@@ -2216,7 +2266,7 @@ def query_doc_handler(
                 collection_name=form_data.collection_name,
                 collection_result=collection_results[form_data.collection_name],
                 query=form_data.query,
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                embedding_function=lambda query, prefix, user=user: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K,
@@ -2283,7 +2333,7 @@ def query_collection_handler(
             return query_collection_with_hybrid_search(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                embedding_function=lambda query, prefix, user=user: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K,
@@ -2313,7 +2363,7 @@ def query_collection_handler(
             return query_collection(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                embedding_function=lambda query, prefix, user=user: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K,

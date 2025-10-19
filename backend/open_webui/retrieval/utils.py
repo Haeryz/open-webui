@@ -210,6 +210,29 @@ def _get_legal_qdrant_client():
         return None
 
 
+_LEGAL_VECTOR_DIM_MISMATCH_REPORTED = False
+
+
+@lru_cache(maxsize=1)
+def _legal_collection_vector_size() -> Optional[int]:
+    client = _get_legal_qdrant_client()
+    if not client or not LEGAL_RAG_COLLECTION:
+        return None
+    try:
+        info = client.get_collection(LEGAL_RAG_COLLECTION)
+    except Exception as exc:  # pragma: no cover - network dependent
+        log.debug(f"Unable to fetch legal collection info: {exc}")
+        return None
+
+    config = getattr(info, "config", None)
+    params = getattr(config, "params", None) if config else None
+    vectors = getattr(params, "vectors", None) if params else None
+    size = getattr(vectors, "size", None) if vectors else None
+    if isinstance(size, int) and size > 0:
+        return size
+    return None
+
+
 @lru_cache(maxsize=1)
 def _legal_feature_aliases() -> dict[str, str]:
     aliases: dict[str, str] = {}
@@ -279,6 +302,8 @@ def _legal_feature_contexts(
     if not client or not queries or embedding_function is None:
         return [], []
 
+    expected_vector_size = _legal_collection_vector_size()
+
     alias_map = _legal_feature_aliases()
     requested_features = _detect_legal_features(queries)
     canonical_requested_features = list(
@@ -331,6 +356,17 @@ def _legal_feature_contexts(
                 user=user,
             )
             vector = _convert_embedding(vector)
+            if expected_vector_size and len(vector) != expected_vector_size:
+                global _LEGAL_VECTOR_DIM_MISMATCH_REPORTED
+                if not _LEGAL_VECTOR_DIM_MISMATCH_REPORTED:
+                    log.error(
+                        "Legal RAG embedding dimension mismatch: got %s, expected %s for collection '%s'.",
+                        len(vector),
+                        expected_vector_size,
+                        LEGAL_RAG_COLLECTION,
+                    )
+                    _LEGAL_VECTOR_DIM_MISMATCH_REPORTED = True
+                continue
             if vector:
                 query_vectors.append(_normalize_vector(vector))
         except Exception as exc:  # pragma: no cover - embedding dependent

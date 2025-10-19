@@ -1,11 +1,12 @@
-import sys, os
+import sys
 sys.path.append(r'd:\Side\KY-Web\open-webui\backend')
 import open_webui.env  # noqa: F401 to ensure .env is loaded
 from sentence_transformers import SentenceTransformer
+from open_webui import config as cfg
 from open_webui.retrieval.utils import _legal_feature_contexts
 
 
-model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+model = SentenceTransformer(cfg.RAG_EMBEDDING_MODEL.value)
 
 
 def embedding_fn(text, prefix=None, user=None):
