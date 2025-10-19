@@ -1094,46 +1094,36 @@ def get_sources_from_items(
                     "metadatas": [[{"url": item.get("url"), "name": item.get("url")}]],
                 }
         elif item.get("type") == "file":
-            if (
-                item.get("context") == "full"
-                or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
-            ):
-                if item.get("file", {}).get("data", {}).get("content", ""):
-                    # Manual Full Mode Toggle
-                    # Used from chat file modal, we can assume that the file content will be available from item.get("file").get("data", {}).get("content")
-                    query_result = {
-                        "documents": [
-                            [item.get("file", {}).get("data", {}).get("content", "")]
-                        ],
-                        "metadatas": [
-                            [
-                                {
-                                    "file_id": item.get("id"),
-                                    "name": item.get("name"),
-                                    **item.get("file")
-                                    .get("data", {})
-                                    .get("metadata", {}),
-                                }
-                            ]
-                        ],
+            file_metadata = {
+                "file_id": item.get("id"),
+                "name": item.get("name"),
+            }
+            file_content = item.get("file", {}).get("data", {}).get("content", "")
+
+            if not file_content and item.get("id"):
+                file_object = Files.get_file_by_id(item.get("id"))
+                if file_object:
+                    file_content = file_object.data.get("content", "")
+                    file_metadata = {
+                        "file_id": item.get("id"),
+                        "name": file_object.filename,
+                        "source": file_object.filename,
+                        **file_object.data.get("metadata", {}),
                     }
-                elif item.get("id"):
-                    file_object = Files.get_file_by_id(item.get("id"))
-                    if file_object:
-                        query_result = {
-                            "documents": [[file_object.data.get("content", "")]],
-                            "metadatas": [
-                                [
-                                    {
-                                        "file_id": item.get("id"),
-                                        "name": file_object.filename,
-                                        "source": file_object.filename,
-                                    }
-                                ]
-                            ],
-                        }
             else:
-                # Fallback to collection names
+                file_metadata.update(
+                    item.get("file", {}).get("data", {}).get("metadata", {})
+                )
+
+            if file_content:
+                query_result = {
+                    "documents": [[file_content]],
+                    "metadatas": [[file_metadata]],
+                }
+            else:
+                # Fall back to the original chunking + vector search flow only when
+                # no extracted content is available. Keep this behaviour so we never
+                # drop a file silently, but prefer the direct full-text response above.
                 if item.get("legacy"):
                     collection_names.append(f"{item['id']}")
                 else:

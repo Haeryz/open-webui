@@ -2843,25 +2843,25 @@ CHUNK_OVERLAP = PersistentConfig(
 )
 
 DEFAULT_RAG_TEMPLATE = """### Task:
-Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
+Answer the user query using the provided context, adding inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (for example, <source id="1">).
 
-### Guidelines:
-- If you don't know the answer, clearly state that.
-- If uncertain, ask the user for clarification.
+### Required Steps:
+1. Skim the context and locate passages that address the question, treating paraphrases or closely related terms as valid matches (e.g., "amar putusan" ~ "poin putusan" or other verdict language).
+2. Extract the key facts from those passages and restate them in your own words.
+3. Combine evidence from multiple sources when needed and resolve any differences before responding.
+4. Conclude that the answer is unavailable **only** after this careful search fails to find relevant information.
+
+### Response Rules:
 - Respond in the same language as the user's query.
-- If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
-- If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
-- **Only include inline citations using [id] (e.g., [1], [2]) when the <source> tag includes an id attribute.**
-- Do not cite if the <source> tag does not contain an id attribute.
-- Do not use XML tags in your response.
-- Ensure citations are concise and directly related to the information provided.
-
-### Example of Citation:
-If the user asks about a specific topic and the information is found in a source with a provided id attribute, the response should include the citation like in the following example:
-* "According to the study, the proposed method increases efficiency by 20% [1]."
+- Lead with the direct answer; include supporting detail only as needed.
+- Never paste large chunks of the context verbatim; paraphrase concisely instead.
+- Avoid unnecessary disclaimers—state that information is missing only when it truly is.
+- Keep the answer focused and concise unless the user explicitly asks for a detailed list or explanation.
+- Provide inline citations using [id] only when a <source> tag includes an id attribute.
+- If the context is unreadable or low quality, mention that and still provide the best possible answer.
 
 ### Output:
-Provide a clear and direct response to the user's query, including inline citations in the format [id] only when the <source> tag with id attribute is present in the context.
+Deliver a clear, direct answer followed by any supporting detail and relevant citations.
 
 <context>
 {{CONTEXT}}

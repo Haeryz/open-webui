@@ -80,42 +80,43 @@
 				return acc;
 			}
 
-			source?.document?.forEach((document, index) => {
-				const metadata = source?.metadata?.[index];
-				const distance = source?.distances?.[index];
+			// NOTE: preserve original Open WebUI citation layout.
+			// The custom chunk aggregation logic we experimented with has been
+			// disabled for now, but kept below for reference if we want to revisit it.
+			//
+			// Legacy chunking prototype (kept for future exploration):
+			// source?.document?.forEach((document, index) => {
+			// 	const metadata = source?.metadata?.[index];
+			// 	const distance = source?.distances?.[index];
+			// 	const id = metadata?.source ?? source?.source?.id ?? 'N/A';
+			// 	let _source = source?.source;
+			// 	if (metadata?.name) {
+			// 		_source = { ..._source, name: metadata.name };
+			// 	}
+			// 	if (id.startsWith('http://') || id.startsWith('https://')) {
+			// 		_source = { ..._source, name: id, url: id };
+			// 	}
+			// 	const existingSource = acc.find((item) => item.id === id);
+			// 	if (existingSource) {
+			// 		existingSource.document.push(document);
+			// 		existingSource.metadata.push(metadata);
+			// 		if (distance !== undefined) {
+			// 			existingSource.distances.push(distance);
+			// 		}
+			// 	} else {
+			// 		acc.push({
+			// 			id,
+			// 			source: _source,
+			// 			document: [document],
+			// 			metadata: metadata ? [metadata] : [],
+			// 			distances: distance !== undefined ? [distance] : undefined
+			// 		});
+			// 	}
+			// });
 
-				// Within the same citation there could be multiple documents
-				const id = metadata?.source ?? source?.source?.id ?? 'N/A';
-				let _source = source?.source;
-
-				if (metadata?.name) {
-					_source = { ..._source, name: metadata.name };
-				}
-
-				if (id.startsWith('http://') || id.startsWith('https://')) {
-					_source = { ..._source, name: id, url: id };
-				}
-
-				const existingSource = acc.find((item) => item.id === id);
-
-				if (existingSource) {
-					existingSource.document.push(document);
-					existingSource.metadata.push(metadata);
-					if (distance !== undefined) existingSource.distances.push(distance);
-				} else {
-					acc.push({
-						id: id,
-						source: _source,
-						document: [document],
-						metadata: metadata ? [metadata] : [],
-						distances: distance !== undefined ? [distance] : undefined
-					});
-				}
-			});
-
+			acc.push(source);
 			return acc;
 		}, []);
-		console.log('citations', citations);
 
 		showRelevance = calculateShowRelevance(citations);
 		showPercentage = shouldShowPercentage(citations);
@@ -172,25 +173,72 @@
 
 {#if showCitations}
 	<div class="py-1.5">
-		<div class="text-xs gap-2 flex flex-col">
+		<div class="flex flex-col gap-2 text-xs">
 			{#each citations as citation, idx}
-				<button
-					id={`source-${id}-${idx + 1}`}
-					class="no-toggle outline-hidden flex dark:text-gray-300 bg-transparent text-gray-600 rounded-xl gap-1.5 items-center"
-					on:click={() => {
-						showCitationModal = true;
-						selectedCitation = citation;
-					}}
-				>
-					<div class=" font-medium bg-gray-50 dark:bg-gray-850 rounded-md px-1">
-						{idx + 1}
-					</div>
-					<div
-						class="flex-1 truncate hover:text-black dark:text-white/60 dark:hover:text-white transition text-left"
+				<div class="space-y-2 rounded-xl border border-gray-100 dark:border-gray-850 bg-gray-50/60 dark:bg-white/5 p-2.5">
+					<button
+						id={`source-${id}-${idx + 1}`}
+						class="no-toggle outline-hidden flex w-full items-center gap-2 text-gray-700 dark:text-gray-200 hover:text-black dark:hover:text-white transition"
+						on:click={() => {
+							showCitationModal = true;
+							selectedCitation = citation;
+						}}
 					>
-						{decodeString(citation.source.name)}
+						<div class="font-semibold bg-white dark:bg-gray-900/60 border border-gray-200 dark:border-gray-850 rounded-md px-1.5 py-0.5">
+							{idx + 1}
+						</div>
+						<div class="flex-1 truncate text-left">
+							{decodeString(citation.source.name)}
+						</div>
+						<svg
+							aria-hidden="true"
+							class="size-3 shrink-0 text-gray-500 dark:text-gray-400"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							viewBox="0 0 24 24"
+							xmlns="http://www.w3.org/2000/svg"
+						>
+							<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+						</svg>
+					</button>
+
+					<div class="space-y-2">
+						{#each citation.document as documentText, docIdx}
+							{@const metadata = citation.metadata?.[docIdx]}
+							{@const distance = citation.distances?.[docIdx]}
+							{@const sourceId = decodeString(metadata?.source ?? citation.id ?? 'N/A')}
+							<div class="rounded-lg border border-gray-200 dark:border-gray-850 bg-white/80 dark:bg-gray-900/40 p-2 space-y-1">
+								<div class="flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+									<span># {sourceId}</span>
+									{#if metadata?.page !== undefined}
+										<span>{$i18n.t('page')} {metadata.page + 1}</span>
+									{/if}
+									{#if metadata?.file_name}
+										<span>{metadata.file_name}</span>
+									{:else if metadata?.nomor_putusan}
+										<span>{metadata.nomor_putusan}</span>
+									{:else if metadata?.name}
+										<span>{metadata.name}</span>
+									{/if}
+									{#if typeof distance === 'number'}
+										<span>{$i18n.t('Relevance')}: {distance.toFixed(4)}</span>
+									{/if}
+								</div>
+								{#if metadata?.html}
+									<iframe
+										class="w-full border-0 rounded-md bg-white dark:bg-gray-900"
+										sandbox="allow-scripts allow-forms allow-same-origin"
+										srcdoc={documentText ?? ''}
+										title={decodeString(citation.source.name)}
+									></iframe>
+								{:else}
+									<pre class="text-xs text-gray-700 dark:text-gray-200 whitespace-pre-wrap max-h-56 overflow-y-auto">{documentText ?? ''}</pre>
+								{/if}
+							</div>
+						{/each}
 					</div>
-				</button>
+				</div>
 			{/each}
 		</div>
 	</div>
