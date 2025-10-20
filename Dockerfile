@@ -3,7 +3,7 @@
 # use build args in the docker build command with --build-arg="BUILDARG=true"
 ARG USE_CUDA=false
 ARG USE_OLLAMA=false
-ARG USE_SLIM=false
+ARG USE_SLIM=true
 ARG USE_PERMISSION_HARDENING=false
 # Tested with cu117 for CUDA 11 and cu121 for CUDA 12 (default)
 ARG USE_CUDA_VER=cu128
@@ -147,7 +147,7 @@ RUN if [ "$USE_CUDA" = "true" ]; then \
     rm -rf /var/lib/apt/lists/*;
 
 # Install Ollama if requested
-RUN if [ "$USE_OLLAMA" = "true" ]; then \
+RUN if [ "$USE_OLLAMA" = "false" ]; then \
     date +%s > /tmp/ollama_build_hash && \
     echo "Cache broken at timestamp: `cat /tmp/ollama_build_hash`" && \
     curl -fsSL https://ollama.com/install.sh | sh && \
