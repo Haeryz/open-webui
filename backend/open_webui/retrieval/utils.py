@@ -127,6 +127,18 @@ def _normalize_vector(vector: Sequence[float]) -> list[float]:
     return [float(v) / norm for v in vector]
 
 
+def _align_vector_dimensions(vector: Sequence[float], expected_size: Optional[int]) -> list[float]:
+    if not vector or not expected_size or expected_size <= 0:
+        return [float(v) for v in vector] if vector else []
+    current_size = len(vector)
+    if current_size == expected_size:
+        return [float(v) for v in vector]
+    if current_size > expected_size:
+        return [float(v) for v in vector[:expected_size]]
+    padded = list(vector) + [0.0] * (expected_size - current_size)
+    return [float(v) for v in padded]
+
+
 def _average_vectors(vectors: list[list[float]]) -> list[float]:
     if not vectors:
         return []
@@ -356,17 +368,20 @@ def _legal_feature_contexts(
                 user=user,
             )
             vector = _convert_embedding(vector)
-            if expected_vector_size and len(vector) != expected_vector_size:
-                global _LEGAL_VECTOR_DIM_MISMATCH_REPORTED
-                if not _LEGAL_VECTOR_DIM_MISMATCH_REPORTED:
-                    log.error(
-                        "Legal RAG embedding dimension mismatch: got %s, expected %s for collection '%s'.",
-                        len(vector),
-                        expected_vector_size,
-                        LEGAL_RAG_COLLECTION,
-                    )
-                    _LEGAL_VECTOR_DIM_MISMATCH_REPORTED = True
-                continue
+            if expected_vector_size:
+                if len(vector) != expected_vector_size:
+                    global _LEGAL_VECTOR_DIM_MISMATCH_REPORTED
+                    if not _LEGAL_VECTOR_DIM_MISMATCH_REPORTED:
+                        log.error(
+                            "Legal RAG embedding dimension mismatch: got %s, expected %s for collection '%s'. Applying automatic vector alignment.",
+                            len(vector),
+                            expected_vector_size,
+                            LEGAL_RAG_COLLECTION,
+                        )
+                        _LEGAL_VECTOR_DIM_MISMATCH_REPORTED = True
+                    vector = _align_vector_dimensions(vector, expected_vector_size)
+                if len(vector) != expected_vector_size:
+                    continue
             if vector:
                 query_vectors.append(_normalize_vector(vector))
         except Exception as exc:  # pragma: no cover - embedding dependent
@@ -453,7 +468,10 @@ def _legal_feature_contexts(
 
         payload = point.payload or {}
         score = float(point.score) if point.score is not None else 0.0
-        extracted_vector = _normalize_vector(_extract_vector_from_scored_point(point))
+        raw_vector = _extract_vector_from_scored_point(point)
+        if expected_vector_size and raw_vector:
+            raw_vector = _align_vector_dimensions(raw_vector, expected_vector_size)
+        extracted_vector = _normalize_vector(raw_vector)
 
         nomor_putusan = payload.get("nomor_putusan")
         file_name = payload.get("file_name")
@@ -525,13 +543,21 @@ def _legal_feature_contexts(
                         prefix=RAG_EMBEDDING_CONTENT_PREFIX,
                         user=user,
                     )
-                    context_vector = _normalize_vector(
-                        _convert_embedding(embedded)
-                    )
+                    embedded_vector = _convert_embedding(embedded)
+                    if expected_vector_size and embedded_vector:
+                        embedded_vector = _align_vector_dimensions(
+                            embedded_vector, expected_vector_size
+                        )
+                    context_vector = _normalize_vector(embedded_vector)
                 except Exception as exc:  # pragma: no cover - embedding dependent
                     log.debug(f"Failed to embed legal context content: {exc}")
 
             if context_vector:
+                if expected_vector_size and len(context_vector) != expected_vector_size:
+                    context_vector = _align_vector_dimensions(
+                        context_vector, expected_vector_size
+                    )
+                    context_vector = _normalize_vector(context_vector)
                 vectors.append(context_vector)
 
             metadata = {
@@ -567,6 +593,11 @@ def _legal_feature_contexts(
             break
 
     aggregated_vector = _average_vectors(vectors)
+    if expected_vector_size and aggregated_vector:
+        aggregated_vector = _align_vector_dimensions(
+            aggregated_vector, expected_vector_size
+        )
+        aggregated_vector = _normalize_vector(aggregated_vector)
     return contexts, aggregated_vector
 
 def is_youtube_url(url: str) -> bool:
