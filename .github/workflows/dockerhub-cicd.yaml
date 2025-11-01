@@ -89,6 +89,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          if [ -n "${AGENT_TOOLSDIRECTORY:-}" ]; then sudo rm -rf "${AGENT_TOOLSDIRECTORY}"; fi
+          sudo docker system prune --all --force --volumes || true
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
