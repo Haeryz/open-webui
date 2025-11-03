@@ -2683,7 +2683,7 @@ PDF_EXTRACT_IMAGES = PersistentConfig(
 RAG_EMBEDDING_MODEL = PersistentConfig(
     "RAG_EMBEDDING_MODEL",
     "rag.embedding_model",
-    os.environ.get("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+    os.environ.get("RAG_EMBEDDING_MODEL", "intfloat/multilingual-e5-large"),
 )
 log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value}")
 
