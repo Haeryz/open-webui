@@ -650,6 +650,8 @@
 			name: fileData.name,
 			collection_name: '',
 			status: 'uploading',
+			progress: 0,
+			processingDetails: null,
 			error: '',
 			itemId: tempItemId,
 			size: 0
@@ -722,7 +724,21 @@
 
 			// Upload file to server
 			console.log('Uploading file to server...');
-			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+			const uploadedFile = await uploadFile(localStorage.token, file, metadata, (event) => {
+				if (event.status) {
+					fileItem.status = event.status;
+				}
+				if (event.progress !== undefined) {
+					fileItem.progress = Math.min(100, Math.max(0, event.progress ?? 0));
+				}
+				if (event.details) {
+					fileItem.processingDetails = event.details;
+				}
+				if (event.error) {
+					fileItem.error = event.error;
+				}
+				files = [...files];
+			});
 
 			if (!uploadedFile) {
 				throw new Error('Server returned null response for file upload');
@@ -731,14 +747,17 @@
 			console.log('File uploaded successfully:', uploadedFile);
 
 			// Update file item with upload results
-			fileItem.status = 'uploaded';
+			fileItem.status = uploadedFile?.data?.status ?? 'completed';
+			fileItem.progress = uploadedFile?.data?.progress ?? 100;
+			fileItem.processingDetails =
+				uploadedFile?.data?.processing_details ?? fileItem.processingDetails;
 			fileItem.file = uploadedFile;
 			fileItem.id = uploadedFile.id;
 			fileItem.size = file.size;
 			fileItem.collection_name = uploadedFile?.meta?.collection_name;
 			fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
 
-			files = files;
+			files = [...files];
 			toast.success($i18n.t('File uploaded successfully'));
 		} catch (e) {
 			console.error('Error uploading file:', e);

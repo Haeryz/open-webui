@@ -1,7 +1,19 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 import { splitStream } from '$lib/utils';
 
-export const uploadFile = async (token: string, file: File, metadata?: object | null) => {
+export interface FileProcessingProgressEvent {
+	status?: string;
+	progress?: number;
+	details?: Record<string, unknown> | null;
+	error?: string;
+}
+
+export const uploadFile = async (
+ token: string,
+ file: File,
+ metadata?: object | null,
+ onProgress?: (event: FileProcessingProgressEvent) => void
+) => {
 	const data = new FormData();
 	data.append('file', file);
 	if (metadata) {
@@ -33,22 +45,32 @@ export const uploadFile = async (token: string, file: File, metadata?: object | 
 	}
 
 	if (res) {
+		onProgress?.({
+			status: res?.data?.status ?? 'uploaded',
+			progress: res?.data?.progress ?? 0,
+			details: res?.data?.processing_details ?? null
+		});
+
 		const status = await getFileProcessStatus(token, res.id);
 
 		if (status && status.ok) {
+			if (!status.body) {
+				throw new Error('Streaming body not available');
+			}
+
 			const reader = status.body
 				.pipeThrough(new TextDecoderStream())
 				.pipeThrough(splitStream('\n'))
 				.getReader();
 
-			while (true) {
-				const { value, done } = await reader.read();
-				if (done) {
+			for (;;) {
+				const { value, done: readerDone } = await reader.read();
+				if (readerDone) {
 					break;
 				}
 
 				try {
-					let lines = value.split('\n');
+					const lines = value.split('\n');
 
 					for (const line of lines) {
 						if (line !== '') {
@@ -56,18 +78,43 @@ export const uploadFile = async (token: string, file: File, metadata?: object | 
 							if (line === 'data: [DONE]') {
 								console.log(line);
 							} else {
-								let data = JSON.parse(line.replace(/^data: /, ''));
+								const data = JSON.parse(line.replace(/^data: /, ''));
 								console.log(data);
+
+								if (res?.data) {
+									if (data?.details) {
+										res.data.processing_details = data.details;
+									}
+									if (data?.progress !== undefined) {
+										res.data.progress = data.progress;
+									}
+									if (data?.status) {
+										res.data.status = data.status;
+									}
+								}
+
+								onProgress?.({
+									status: data?.status,
+									progress: data?.progress,
+									details: data?.details ?? null,
+									error: data?.error
+								});
 
 								if (data?.error) {
 									console.error(data.error);
 									res.error = data.error;
+									error = data.error;
+									break;
 								}
 							}
 						}
 					}
 				} catch (error) {
 					console.log(error);
+				}
+
+				if (error) {
+					break;
 				}
 			}
 		}

@@ -380,6 +380,8 @@ ${content}
 			name: file.name,
 			collection_name: '',
 			status: 'uploading',
+			progress: 0,
+			processingDetails: null,
 			size: file.size,
 			error: '',
 			itemId: tempItemId
@@ -412,7 +414,21 @@ ${content}
 			}
 
 			// During the file upload, file content is automatically extracted.
-			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+			const uploadedFile = await uploadFile(localStorage.token, file, metadata, (event) => {
+				if (event.status) {
+					fileItem.status = event.status;
+				}
+				if (event.progress !== undefined) {
+					fileItem.progress = Math.min(100, Math.max(0, event.progress ?? 0));
+				}
+				if (event.details) {
+					fileItem.processingDetails = event.details;
+				}
+				if (event.error) {
+					fileItem.error = event.error;
+				}
+				files = [...files];
+			});
 
 			if (uploadedFile) {
 				console.log('File upload completed:', {
@@ -426,7 +442,10 @@ ${content}
 					toast.warning(uploadedFile.error);
 				}
 
-				fileItem.status = 'uploaded';
+				fileItem.status = uploadedFile?.data?.status ?? 'completed';
+				fileItem.progress = uploadedFile?.data?.progress ?? 100;
+				fileItem.processingDetails =
+					uploadedFile?.data?.processing_details ?? fileItem.processingDetails;
 				fileItem.file = uploadedFile;
 				fileItem.id = uploadedFile.id;
 				fileItem.collection_name =
@@ -434,7 +453,7 @@ ${content}
 
 				fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
 
-				files = files;
+				files = [...files];
 			} else {
 				files = files.filter((item) => item?.itemId !== tempItemId);
 			}

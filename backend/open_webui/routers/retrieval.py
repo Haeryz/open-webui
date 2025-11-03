@@ -5,12 +5,13 @@ import os
 import shutil
 import asyncio
 import copy
+import time
 
 import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Union
+from typing import Iterator, List, Optional, Sequence, Union, Dict, Any
 
 from fastapi import (
     Depends,
@@ -1450,7 +1451,14 @@ def save_docs_to_vector_db(
                 log.info(
                     f"collection {collection_name} already exists, overwrite is False and add is False"
                 )
-                return True
+                return {
+                    "success": True,
+                    "chunks": 0,
+                    "token_counts": [],
+                    "total_tokens": 0,
+                    "embedding_dimensions": 0,
+                    "skipped": True,
+                }
 
         log.info(f"generating embeddings for {collection_name}")
         embedding_function = get_embedding_function(
@@ -1483,6 +1491,22 @@ def save_docs_to_vector_db(
             ),
         )
 
+        token_counts: list[int] = []
+        total_tokens = 0
+        try:
+            encoding_name = str(request.app.state.config.TIKTOKEN_ENCODING_NAME)
+            encoding = tiktoken.get_encoding(encoding_name)
+        except Exception:
+            encoding = tiktoken.get_encoding("cl100k_base")
+
+        for text in texts:
+            try:
+                token_len = len(encoding.encode(text))
+            except Exception:
+                token_len = len(text.split())
+            token_counts.append(token_len)
+            total_tokens += token_len
+
         embeddings = embedding_function(
             list(map(lambda x: x.replace("\n", " "), texts)),
             prefix=RAG_EMBEDDING_CONTENT_PREFIX,
@@ -1507,10 +1531,100 @@ def save_docs_to_vector_db(
         )
 
         log.info(f"added {len(items)} items to collection {collection_name}")
-        return True
+        return {
+            "success": True,
+            "chunks": len(items),
+            "token_counts": token_counts,
+            "total_tokens": total_tokens,
+            "embedding_dimensions": len(embeddings[0]) if embeddings else 0,
+        }
     except Exception as e:
         log.exception(e)
         raise e
+
+
+class ProcessingProgressTracker:
+    def __init__(self, file_model: FileModel):
+        base_data = file_model.data or {}
+        self.file_id = file_model.id
+        self.progress = base_data.get("progress", 0)
+        self.details: Dict[str, Any] = copy.deepcopy(
+            base_data.get("processing_details") or {"steps": {}}
+        )
+        self.details.setdefault("steps", {})
+        if "stage" not in self.details:
+            self.details["stage"] = base_data.get("status", "uploaded")
+        if "started_at" not in self.details:
+            self.details["started_at"] = int(time.time())
+        self.details["updated_at"] = int(time.time())
+
+    def ensure_step(self, name: str, label: Optional[str] = None) -> Dict[str, Any]:
+        steps = self.details.setdefault("steps", {})
+        step = steps.get(name)
+        if not step:
+            step = {
+                "status": "pending",
+                "progress": 0,
+            }
+            if label:
+                step["label"] = label
+            steps[name] = step
+        else:
+            if label and "label" not in step:
+                step["label"] = label
+            step.setdefault("status", "pending")
+            step.setdefault("progress", 0)
+        return step
+
+    def update(
+        self,
+        *,
+        status: Optional[str] = None,
+        progress: Optional[float] = None,
+        stage: Optional[str] = None,
+        step: Optional[str] = None,
+        step_label: Optional[str] = None,
+        step_status: Optional[str] = None,
+        step_progress: Optional[float] = None,
+        extra_step: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        if step:
+            step_entry = self.ensure_step(step, step_label)
+            if step_status:
+                step_entry["status"] = step_status
+            if step_progress is not None:
+                step_entry["progress"] = step_progress
+            if extra_step:
+                step_entry.update(extra_step)
+
+        if stage:
+            self.details["stage"] = stage
+
+        if metrics is not None:
+            if metrics:
+                self.details["metrics"] = metrics
+            else:
+                self.details.pop("metrics", None)
+
+        if error is not None:
+            if error:
+                self.details["error"] = error
+            else:
+                self.details.pop("error", None)
+
+        self.details["updated_at"] = int(time.time())
+
+        update_payload: Dict[str, Any] = {"processing_details": self.details}
+        if status:
+            update_payload["status"] = status
+
+        if progress is not None:
+            self.progress = progress
+        update_payload["progress"] = self.progress
+
+        Files.update_file_data_by_id(self.file_id, update_payload)
 
 
 class ProcessFileForm(BaseModel):
@@ -1531,24 +1645,55 @@ def process_file(
         file = Files.get_file_by_id_and_user_id(form_data.file_id, user.id)
 
     if file:
-        try:
+        tracker = ProcessingProgressTracker(file)
+        tracker.ensure_step("upload", "Upload")
+        step_labels = {
+            "text_extraction": "Extracting content",
+            "chunking": "Chunking text",
+            "embedding": "Generating embeddings",
+            "indexing": "Saving embeddings",
+        }
+        for key, label in step_labels.items():
+            tracker.ensure_step(key, label)
 
+        tracker.update(
+            status="embedding",
+            progress=max(tracker.progress, 5),
+            stage="preparing",
+            step="upload",
+            step_label="Upload",
+            step_status="completed",
+            step_progress=100,
+        )
+
+        start_time = time.time()
+        extraction_duration = 0.0
+        embedding_duration = 0.0
+        current_step: Optional[str] = None
+
+        try:
             collection_name = form_data.collection_name
 
             if collection_name is None:
                 collection_name = f"file-{file.id}"
 
             if form_data.content:
-                # Update the content in the file
-                # Usage: /files/{file_id}/data/content/update, /files/ (audio file upload pipeline)
+                current_step = "text_extraction"
+                tracker.update(
+                    progress=max(tracker.progress, 20),
+                    stage="content_received",
+                    step=current_step,
+                    step_label=step_labels[current_step],
+                    step_status="completed",
+                    step_progress=100,
+                    extra_step={"source": "manual_input"},
+                )
 
                 try:
-                    # /files/{file_id}/data/content/update
                     VECTOR_DB_CLIENT.delete_collection(
                         collection_name=f"file-{file.id}"
                     )
-                except:
-                    # Audio file upload pipeline
+                except Exception:
                     pass
 
                 docs = [
@@ -1566,21 +1711,39 @@ def process_file(
 
                 text_content = form_data.content
             elif form_data.collection_name:
-                # Check if the file has already been processed and save the content
-                # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
+                current_step = "text_extraction"
+                tracker.update(
+                    progress=max(tracker.progress, 20),
+                    stage="retrieving_existing_content",
+                    step=current_step,
+                    step_label=step_labels[current_step],
+                    step_status="running",
+                    step_progress=30,
+                )
 
-                result = VECTOR_DB_CLIENT.query(
+                query_result = VECTOR_DB_CLIENT.query(
                     collection_name=f"file-{file.id}", filter={"file_id": file.id}
                 )
 
-                if result is not None and len(result.ids[0]) > 0:
+                if query_result is not None and len(query_result.ids[0]) > 0:
                     docs = [
                         Document(
-                            page_content=result.documents[0][idx],
-                            metadata=result.metadatas[0][idx],
+                            page_content=query_result.documents[0][idx],
+                            metadata=query_result.metadatas[0][idx],
                         )
-                        for idx, id in enumerate(result.ids[0])
+                        for idx, _ in enumerate(query_result.ids[0])
                     ]
+                    tracker.update(
+                        progress=max(tracker.progress, 30),
+                        stage="retrieving_existing_content",
+                        step=current_step,
+                        step_status="completed",
+                        step_progress=100,
+                        extra_step={
+                            "source": "vector_store",
+                            "documents": len(query_result.ids[0]),
+                        },
+                    )
                 else:
                     docs = [
                         Document(
@@ -1594,11 +1757,27 @@ def process_file(
                             },
                         )
                     ]
+                    tracker.update(
+                        progress=max(tracker.progress, 30),
+                        stage="retrieving_existing_content",
+                        step=current_step,
+                        step_status="completed",
+                        step_progress=100,
+                        extra_step={"source": "cached_file"},
+                    )
 
                 text_content = file.data.get("content", "")
             else:
-                # Process the file and save the content
-                # Usage: /files/
+                current_step = "text_extraction"
+                tracker.update(
+                    progress=max(tracker.progress, 15),
+                    stage="extracting",
+                    step=current_step,
+                    step_label=step_labels[current_step],
+                    step_status="running",
+                    step_progress=15,
+                )
+
                 file_path = file.path
                 if file_path:
                     file_path = Storage.get_file(file_path)
@@ -1638,9 +1817,12 @@ def process_file(
                         DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                         MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
                     )
-                    docs = loader.load(
+
+                    extraction_start = time.time()
+                    loaded_docs = loader.load(
                         file.filename, file.meta.get("content_type"), file_path
                     )
+                    extraction_duration = time.time() - extraction_start
 
                     docs = [
                         Document(
@@ -1653,8 +1835,20 @@ def process_file(
                                 "source": file.filename,
                             },
                         )
-                        for doc in docs
+                        for doc in loaded_docs
                     ]
+
+                    tracker.update(
+                        progress=max(tracker.progress, 30),
+                        stage="extracting",
+                        step=current_step,
+                        step_status="completed",
+                        step_progress=100,
+                        extra_step={
+                            "duration_seconds": round(extraction_duration, 2),
+                            "documents": len(docs),
+                        },
+                    )
                 else:
                     docs = [
                         Document(
@@ -1668,10 +1862,38 @@ def process_file(
                             },
                         )
                     ]
+                    tracker.update(
+                        progress=max(tracker.progress, 30),
+                        stage="extracting",
+                        step=current_step,
+                        step_status="completed",
+                        step_progress=100,
+                        extra_step={"source": "cached_file"},
+                    )
+
                 text_content = " ".join([doc.page_content for doc in docs])
+
+            current_step = "chunking"
+            tracker.update(
+                progress=max(tracker.progress, 40),
+                stage="chunking",
+                step=current_step,
+                step_label=step_labels[current_step],
+                step_status="running",
+                step_progress=20,
+            )
 
             text_chunks = chunk_text_by_words(text_content)
             log.debug(f"text_content: {text_content}")
+            tracker.update(
+                progress=max(tracker.progress, 55),
+                stage="chunking",
+                step=current_step,
+                step_status="completed",
+                step_progress=100,
+                extra_step={"preview_chunks": len(text_chunks)},
+            )
+
             Files.update_file_data_by_id(
                 file.id,
                 {"content": text_content, "chunks": text_chunks},
@@ -1680,7 +1902,34 @@ def process_file(
             Files.update_file_hash_by_id(file.id, hash)
 
             if request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
-                Files.update_file_data_by_id(file.id, {"status": "completed"})
+                tracker.update(
+                    step="embedding",
+                    step_label=step_labels["embedding"],
+                    step_status="skipped",
+                    step_progress=0,
+                )
+                tracker.update(
+                    step="indexing",
+                    step_label=step_labels["indexing"],
+                    step_status="skipped",
+                    step_progress=0,
+                )
+                metrics = {
+                    "chunk_preview_count": len(text_chunks),
+                    "content_characters": len(text_content),
+                    "hash": hash,
+                    "processing_time_seconds": round(time.time() - start_time, 2),
+                    "extraction_time_seconds": round(extraction_duration, 2),
+                    "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
+                    "embedding_model": request.app.state.config.RAG_EMBEDDING_MODEL,
+                }
+                tracker.update(
+                    status="completed",
+                    progress=100,
+                    stage="completed",
+                    metrics=metrics,
+                    error=None,
+                )
                 return {
                     "status": True,
                     "collection_name": None,
@@ -1690,6 +1939,17 @@ def process_file(
                 }
             else:
                 try:
+                    current_step = "embedding"
+                    tracker.update(
+                        progress=max(tracker.progress, 60),
+                        stage="embedding",
+                        step=current_step,
+                        step_label=step_labels[current_step],
+                        step_status="running",
+                        step_progress=30,
+                    )
+
+                    embedding_start = time.time()
                     result = save_docs_to_vector_db(
                         request,
                         docs=docs,
@@ -1699,12 +1959,29 @@ def process_file(
                             "name": file.filename,
                             "hash": hash,
                         },
-                        add=(True if form_data.collection_name else False),
+                        add=bool(form_data.collection_name),
                         user=user,
                     )
-                    log.info(f"added {len(docs)} items to collection {collection_name}")
+                    embedding_duration = time.time() - embedding_start
 
-                    if result:
+                    tracker.update(
+                        progress=max(tracker.progress, 85),
+                        stage="embedding",
+                        step=current_step,
+                        step_status="completed",
+                        step_progress=100,
+                        extra_step={
+                            "duration_seconds": round(embedding_duration, 2),
+                            "batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+                        },
+                    )
+
+                    indexed_chunks = result.get("chunks", len(docs)) if isinstance(result, dict) else len(docs)
+                    log.info(
+                        f"added {indexed_chunks} items to collection {collection_name}"
+                    )
+
+                    if result and result.get("success"):
                         Files.update_file_metadata_by_id(
                             file.id,
                             {
@@ -1712,9 +1989,65 @@ def process_file(
                             },
                         )
 
-                        Files.update_file_data_by_id(
-                            file.id,
-                            {"status": "completed"},
+                        current_step = "indexing"
+                        tracker.update(
+                            progress=max(tracker.progress, 95),
+                            stage="indexing",
+                            step=current_step,
+                            step_label=step_labels[current_step],
+                            step_status="completed",
+                            step_progress=100,
+                            extra_step={
+                                "collection": collection_name,
+                                "items_indexed": indexed_chunks,
+                                "vector_store": VECTOR_DB_CLIENT.__class__.__name__,
+                            },
+                        )
+
+                        token_counts = result.get("token_counts", []) or []
+                        total_tokens = result.get("total_tokens", 0)
+                        chunk_count = result.get("chunks", len(docs)) or len(docs)
+                        avg_tokens = (
+                            round(total_tokens / chunk_count, 2)
+                            if chunk_count
+                            else 0
+                        )
+                        max_tokens = max(token_counts) if token_counts else 0
+                        min_tokens = min(token_counts) if token_counts else 0
+                        metrics = {
+                            "chunk_preview_count": len(text_chunks),
+                            "chunks_indexed": chunk_count,
+                            "content_characters": len(text_content),
+                            "hash": hash,
+                            "token_stats": {
+                                "total": total_tokens,
+                                "average_per_chunk": avg_tokens,
+                                "max_per_chunk": max_tokens,
+                                "min_per_chunk": min_tokens,
+                                "per_chunk_preview": token_counts[:50],
+                            },
+                            "embedding_dimensions": result.get(
+                                "embedding_dimensions", 0
+                            ),
+                            "processing_time_seconds": round(
+                                time.time() - start_time, 2
+                            ),
+                            "extraction_time_seconds": round(
+                                extraction_duration, 2
+                            ),
+                            "embedding_time_seconds": round(
+                                embedding_duration, 2
+                            ),
+                            "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
+                            "embedding_model": request.app.state.config.RAG_EMBEDDING_MODEL,
+                        }
+
+                        tracker.update(
+                            status="completed",
+                            progress=100,
+                            stage="completed",
+                            metrics=metrics,
+                            error=None,
                         )
 
                         return {
@@ -1725,18 +2058,31 @@ def process_file(
                             "chunks": text_chunks,
                         }
                     else:
-                        raise Exception("Error saving document to vector database")
+                        raise Exception(
+                            "Error saving document to vector database"
+                        )
                 except Exception as e:
                     raise e
 
         except Exception as e:
-            log.exception(e)
-            Files.update_file_data_by_id(
-                file.id,
-                {"status": "failed"},
+            error_message = (
+                str(e.detail) if hasattr(e, "detail") else str(e)
             )
+            tracker.update(
+                status="failed",
+                progress=tracker.progress,
+                stage="failed",
+                step=current_step,
+                step_label=step_labels.get(current_step, current_step)
+                if current_step
+                else None,
+                step_status="failed" if current_step else None,
+                error=error_message,
+                extra_step={"error": error_message} if current_step else None,
+            )
+            log.exception(e)
 
-            if "No pandoc was found" in str(e):
+            if "No pandoc was found" in error_message:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.PANDOC_NOT_INSTALLED,
@@ -1744,7 +2090,7 @@ def process_file(
             else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=str(e),
+                    detail=error_message,
                 )
 
     else:
@@ -1779,7 +2125,7 @@ def process_text(
     log.debug(f"text_content: {text_content}")
 
     result = save_docs_to_vector_db(request, docs, collection_name, user=user)
-    if result:
+    if result and result.get("success"):
         return {
             "status": True,
             "collection_name": collection_name,

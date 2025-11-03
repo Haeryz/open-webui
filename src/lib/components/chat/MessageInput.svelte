@@ -535,6 +535,8 @@
 			name: file.name,
 			collection_name: '',
 			status: 'uploading',
+			progress: 0,
+			processingDetails: null,
 			size: file.size,
 			error: '',
 			itemId: tempItemId,
@@ -562,7 +564,21 @@
 				}
 
 				// During the file upload, file content is automatically extracted.
-				const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+				const uploadedFile = await uploadFile(localStorage.token, file, metadata, (event) => {
+					if (event.status) {
+						fileItem.status = event.status;
+					}
+					if (event.progress !== undefined) {
+						fileItem.progress = Math.min(100, Math.max(0, event.progress ?? 0));
+					}
+					if (event.details) {
+						fileItem.processingDetails = event.details;
+					}
+					if (event.error) {
+						fileItem.error = event.error;
+					}
+					files = [...files];
+				});
 
 				if (uploadedFile) {
 					console.log('File upload completed:', {
@@ -576,14 +592,17 @@
 						toast.warning(uploadedFile.error);
 					}
 
-					fileItem.status = 'uploaded';
+					fileItem.status = uploadedFile?.data?.status ?? 'completed';
+					fileItem.progress = uploadedFile?.data?.progress ?? 100;
+					fileItem.processingDetails =
+						uploadedFile?.data?.processing_details ?? fileItem.processingDetails;
 					fileItem.file = uploadedFile;
 					fileItem.id = uploadedFile.id;
 					fileItem.collection_name =
 						uploadedFile?.meta?.collection_name || uploadedFile?.collection_name;
 					fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
 
-					files = files;
+					files = [...files];
 				} else {
 					files = files.filter((item) => item?.itemId !== tempItemId);
 				}
@@ -617,7 +636,7 @@
 				fileItem.content = content;
 				fileItem.id = uuidv4(); // Temporary ID for the file
 
-				files = files;
+				files = [...files];
 			}
 		}
 	};
@@ -1130,7 +1149,7 @@
 															aria-label={$i18n.t('Remove file')}
 															on:click={() => {
 																files.splice(fileIdx, 1);
-																files = files;
+																files = [...files];
 															}}
 														>
 															<svg
@@ -1161,7 +1180,7 @@
 													on:dismiss={async () => {
 														// Remove from UI state
 														files.splice(fileIdx, 1);
-														files = files;
+														files = [...files];
 													}}
 													on:click={() => {
 														console.log(file);

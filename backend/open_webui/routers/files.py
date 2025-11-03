@@ -2,6 +2,8 @@ import logging
 import os
 import uuid
 import json
+import time
+import copy
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Optional
@@ -122,11 +124,31 @@ def process_uploaded_file(request, file, file_path, file_item, file_metadata, us
             process_file(request, ProcessFileForm(file_id=file_item.id), user=user)
     except Exception as e:
         log.error(f"Error processing file: {file_item.id}")
+        current_record = Files.get_file_by_id(file_item.id)
+        existing_data = {}
+        if current_record and current_record.data:
+            existing_data = current_record.data
+        elif getattr(file_item, "data", None):
+            existing_data = file_item.data
+
+        existing_progress = existing_data.get("progress", 0)
+        existing_processing = existing_data.get("processing_details")
+        processing_details = (
+            copy.deepcopy(existing_processing) if existing_processing else {"steps": {}}
+        )
+        processing_details["stage"] = "failed"
+        processing_details["error"] = (
+            str(e.detail) if hasattr(e, "detail") else str(e)
+        )
+        processing_details["updated_at"] = int(time.time())
+
         Files.update_file_data_by_id(
             file_item.id,
             {
                 "status": "failed",
-                "error": str(e.detail) if hasattr(e, "detail") else str(e),
+                "progress": existing_progress,
+                "error": processing_details["error"],
+                "processing_details": processing_details,
             },
         )
 
@@ -209,6 +231,54 @@ def upload_file_handler(
             },
         )
 
+        timestamp = int(time.time())
+        processing_steps = {
+            "upload": {
+                "label": "Upload",
+                "status": "completed",
+                "progress": 100,
+                "updated_at": timestamp,
+            }
+        }
+
+        if process:
+            processing_steps.update(
+                {
+                    "text_extraction": {
+                        "label": "Extracting content",
+                        "status": "pending",
+                        "progress": 0,
+                    },
+                    "chunking": {
+                        "label": "Chunking text",
+                        "status": "pending",
+                        "progress": 0,
+                    },
+                    "embedding": {
+                        "label": "Generating embeddings",
+                        "status": "pending",
+                        "progress": 0,
+                    },
+                    "indexing": {
+                        "label": "Saving embeddings",
+                        "status": "pending",
+                        "progress": 0,
+                    },
+                }
+            )
+
+        processing_details = {
+            "stage": "uploaded",
+            "steps": processing_steps,
+            "updated_at": timestamp,
+        }
+
+        initial_data = {
+            "status": "uploaded",
+            "progress": 0,
+            "processing_details": processing_details,
+        }
+
         file_item = Files.insert_new_file(
             user.id,
             FileForm(
@@ -216,9 +286,7 @@ def upload_file_handler(
                     "id": id,
                     "filename": name,
                     "path": file_path,
-                    "data": {
-                        **({"status": "pending"} if process else {}),
-                    },
+                    "data": initial_data,
                     "meta": {
                         "name": name,
                         "content_type": file.content_type,
@@ -414,8 +482,17 @@ async def get_file_process_status(
                             status = data.get("status")
 
                             if status:
-                                event = {"status": status}
-                                if status == "failed":
+                                event: dict[str, object] = {"status": status}
+
+                                progress = data.get("progress")
+                                if progress is not None:
+                                    event["progress"] = progress
+
+                                details = data.get("processing_details")
+                                if details:
+                                    event["details"] = details
+
+                                if data.get("error"):
                                     event["error"] = data.get("error")
 
                                 yield f"data: {json.dumps(event)}\n\n"
