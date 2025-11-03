@@ -4,6 +4,7 @@
 
 	import Selector from './Knowledge/Selector.svelte';
 	import FileItem from '$lib/components/common/FileItem.svelte';
+	import { isFileProcessing } from '$lib/utils/file-processing';
 
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
 	import { uploadFile } from '$lib/apis/files';
@@ -197,7 +198,7 @@
 						name={file.name}
 						modal={true}
 						edit={true}
-						loading={file.status === 'uploading'}
+						loading={isFileProcessing(file)}
 						type={file?.legacy
 							? `Legacy${file.type ? ` ${file.type}` : ''}`
 							: (file?.type ?? 'collection')}

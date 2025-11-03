@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher, getContext } from 'svelte';
 	import { formatFileSize } from '$lib/utils';
+	import { formatProcessingStage, isProcessingStatus, normalizeProgress } from '$lib/utils/file-processing';
 
 	import FileItemModal from './FileItemModal.svelte';
 	import GarbageBin from '../icons/GarbageBin.svelte';
@@ -43,6 +44,13 @@
 			return str;
 		}
 	};
+
+	$: baseStatus = item?.status ?? item?.file?.data?.status ?? null;
+	$: baseProgress = normalizeProgress(item?.progress ?? item?.file?.data?.progress ?? null);
+	$: processingDetails = item?.processingDetails ?? item?.file?.data?.processing_details ?? null;
+	$: computedLoading = loading || isProcessingStatus(baseStatus, baseProgress);
+	$: activeStageLabel = formatProcessingStage(processingDetails?.stage, baseStatus);
+	$: errorMessage = item?.error ?? item?.file?.data?.error ?? null;
 </script>
 
 {#if item}
@@ -74,7 +82,7 @@
 		<div
 			class="size-10 shrink-0 flex justify-center items-center bg-black/20 dark:bg-white/10 text-white rounded-xl"
 		>
-			{#if !loading}
+			{#if !computedLoading}
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
 					viewBox="0 0 24 24"
@@ -97,7 +105,7 @@
 		</div>
 	{:else}
 		<div class="pl-1.5">
-			{#if !loading}
+			{#if !computedLoading}
 				<Tooltip
 					content={type === 'collection'
 						? $i18n.t('Collection')
@@ -168,6 +176,31 @@
 				</div>
 			</div>
 		</Tooltip>
+	{/if}
+
+	{#if computedLoading && (activeStageLabel || baseProgress !== null)}
+		<div class="w-full mt-1">
+			<div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+				<div class="capitalize">{activeStageLabel || $i18n.t('Processing')}</div>
+				{#if baseProgress !== null}
+					<div>{baseProgress}%</div>
+				{/if}
+			</div>
+			{#if baseProgress !== null}
+				<div class="mt-1 h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+					<div
+						class="h-full rounded-full bg-blue-500 dark:bg-blue-400 transition-all duration-300"
+						style={`width: ${baseProgress}%`}
+					/>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	{#if !computedLoading && errorMessage}
+		<div class="w-full mt-1 text-xs text-red-500 dark:text-red-400 line-clamp-2">
+			{errorMessage}
+		</div>
 	{/if}
 
 	{#if dismissible}

@@ -20,6 +20,7 @@
 		getWeekday,
 		extractCurlyBraceWords
 	} from '$lib/utils';
+	import { isFileProcessing } from '$lib/utils/file-processing';
 
 	import { getSessionUser } from '$lib/apis/auths';
 
@@ -864,7 +865,7 @@
 												type={file.type}
 												size={file?.size}
 												small={true}
-												loading={file.status === 'uploading'}
+												loading={isFileProcessing(file)}
 												dismissible={true}
 												edit={true}
 												on:dismiss={() => {

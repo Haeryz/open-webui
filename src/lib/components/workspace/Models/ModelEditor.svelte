@@ -4,6 +4,7 @@
 	import { onMount, getContext, tick } from 'svelte';
 	import { models, tools, functions, knowledge as knowledgeCollections, user } from '$lib/stores';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { isFileProcessing } from '$lib/utils/file-processing';
 
 	import { getTools } from '$lib/apis/tools';
 	import { getFunctions } from '$lib/apis/functions';
@@ -136,7 +137,7 @@
 			return;
 		}
 
-		if (knowledge.some((item) => item.status === 'uploading')) {
+		if (knowledge.some((item) => isFileProcessing(item))) {
 			toast.error($i18n.t('Please wait until all files are uploaded.'));
 			loading = false;
 

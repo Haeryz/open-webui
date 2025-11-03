@@ -41,6 +41,7 @@
 		getUserTimezone,
 		getWeekday
 	} from '$lib/utils';
+	import { isFileProcessing } from '$lib/utils/file-processing';
 	import { uploadFile } from '$lib/apis/files';
 	import { generateAutoCompletion } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
@@ -1172,7 +1173,7 @@
 													name={file.name}
 													type={file.type}
 													size={file?.size}
-													loading={file.status === 'uploading'}
+													loading={isFileProcessing(file)}
 													dismissible={true}
 													edit={true}
 													small={true}

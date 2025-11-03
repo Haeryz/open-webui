@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import { isFileProcessing } from '$lib/utils/file-processing';
 	const dispatch = createEventDispatcher();
 
 	import FileItem from '$lib/components/common/FileItem.svelte';
@@ -23,17 +24,17 @@
 				name={file?.name ?? file?.meta?.name}
 				type="file"
 				size={file?.size ?? file?.meta?.size ?? ''}
-				loading={file.status === 'uploading'}
+				loading={isFileProcessing(file)}
 				dismissible
 				on:click={() => {
-					if (file.status === 'uploading') {
+					if (isFileProcessing(file)) {
 						return;
 					}
 
 					dispatch('click', file.id);
 				}}
 				on:dismiss={() => {
-					if (file.status === 'uploading') {
+					if (isFileProcessing(file)) {
 						return;
 					}
 
