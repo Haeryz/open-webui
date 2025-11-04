@@ -152,6 +152,40 @@
 	let files = [];
 	let params = {};
 
+	const normalizeTitle = (value: unknown): string =>
+		typeof value === 'string' ? value.trim() : '';
+
+	const deriveTitleFromMessages = (messages: Array<{ role?: string; content?: string }> = []) => {
+		const currentTitle = normalizeTitle($chatTitle);
+		if (currentTitle) {
+			return currentTitle;
+		}
+
+		const persistedTitle = normalizeTitle(chat?.chat?.title ?? chat?.title);
+		if (persistedTitle && persistedTitle !== 'New Chat') {
+			return persistedTitle;
+		}
+
+		const firstUserMessage = normalizeTitle(messages.find((m) => m.role === 'user')?.content);
+		if (firstUserMessage) {
+			const bounded = firstUserMessage.length > 120 ? `${firstUserMessage.slice(0, 120)}...` : firstUserMessage;
+			chatTitle.set(bounded);
+			return bounded;
+		}
+
+		return persistedTitle || 'New Chat';
+	};
+
+	const buildChatUpdatePayload = (messages: Array<any>, extra: Record<string, unknown> = {}) => ({
+		title: deriveTitleFromMessages(messages),
+		models: selectedModels,
+		messages,
+		history,
+		params,
+		files: chatFiles,
+		...extra
+	});
+
 	$: if (chatIdProp) {
 		navigateHandler();
 	}
@@ -1144,13 +1178,11 @@
 
 		if ($chatId == chatId) {
 			if (!$temporaryChatEnabled) {
-				chat = await updateChatById(localStorage.token, chatId, {
-					models: selectedModels,
-					messages: messages,
-					history: history,
-					params: params,
-					files: chatFiles
-				});
+				chat = await updateChatById(
+					localStorage.token,
+					chatId,
+					buildChatUpdatePayload(messages)
+				);
 
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -1199,13 +1231,11 @@
 
 		if ($chatId == chatId) {
 			if (!$temporaryChatEnabled) {
-				chat = await updateChatById(localStorage.token, chatId, {
-					models: selectedModels,
-					messages: messages,
-					history: history,
-					params: params,
-					files: chatFiles
-				});
+				chat = await updateChatById(
+					localStorage.token,
+					chatId,
+					buildChatUpdatePayload(messages)
+				);
 
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -2238,13 +2268,12 @@
 	const saveChatHandler = async (_chatId, history) => {
 		if ($chatId == _chatId) {
 			if (!$temporaryChatEnabled) {
-				chat = await updateChatById(localStorage.token, _chatId, {
-					models: selectedModels,
-					history: history,
-					messages: createMessagesList(history, history.currentId),
-					params: params,
-					files: chatFiles
-				});
+				const messages = createMessagesList(history, history.currentId);
+				chat = await updateChatById(
+					localStorage.token,
+					_chatId,
+					buildChatUpdatePayload(messages)
+				);
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
 			}
