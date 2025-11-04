@@ -3,7 +3,7 @@ import math
 import os
 from functools import lru_cache
 from types import SimpleNamespace
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Optional, Sequence, Tuple, Union
 
 import requests
 import hashlib
@@ -1004,40 +1004,58 @@ def get_embedding_function(
     azure_api_version=None,
 ):
     if embedding_engine == "":
-        return lambda query, prefix=None, user=None: embedding_function.encode(
-            query, **({"prompt": prefix} if prefix else {})
-        ).tolist()
-    elif embedding_engine in ["ollama", "openai", "azure_openai"]:
-        func = lambda query, prefix=None, user=None: generate_embeddings(
-            engine=embedding_engine,
-            model=embedding_model,
-            text=query,
-            prefix=prefix,
-            url=url,
-            key=key,
-            user=user,
-            azure_api_version=azure_api_version,
-        )
+        def encode_with_optional_progress(
+            query,
+            prefix=None,
+            user=None,
+            progress_callback: Optional[Callable[[dict], None]] = None,
+        ):
+            return embedding_function.encode(query, **({"prompt": prefix} if prefix else {})).tolist()
 
-        def generate_multiple(query, prefix, user, func):
+        return encode_with_optional_progress
+    elif embedding_engine in ["ollama", "openai", "azure_openai"]:
+        def func(query, prefix=None, user=None):
+            return generate_embeddings(
+                engine=embedding_engine,
+                model=embedding_model,
+                text=query,
+                prefix=prefix,
+                url=url,
+                key=key,
+                user=user,
+                azure_api_version=azure_api_version,
+            )
+
+        def generate_multiple(
+            query,
+            prefix=None,
+            user=None,
+            progress_callback: Optional[Callable[[dict], None]] = None,
+        ):
             if isinstance(query, list):
-                embeddings = []
-                for i in range(0, len(query), embedding_batch_size):
-                    batch_embeddings = func(
-                        query[i : i + embedding_batch_size],
-                        prefix=prefix,
-                        user=user,
-                    )
+                embeddings: list[Any] = []
+                total_items = len(query)
+                for i in range(0, total_items, embedding_batch_size):
+                    batch = query[i : i + embedding_batch_size]
+                    batch_embeddings = func(batch, prefix=prefix, user=user)
 
                     if isinstance(batch_embeddings, list):
                         embeddings.extend(batch_embeddings)
-                return embeddings
-            else:
-                return func(query, prefix, user)
 
-        return lambda query, prefix=None, user=None: generate_multiple(
-            query, prefix, user, func
-        )
+                    if callable(progress_callback):
+                        processed_items = min(i + len(batch), total_items)
+                        progress_callback(
+                            {
+                                "processed_items": processed_items,
+                                "total_items": total_items,
+                            }
+                        )
+
+                return embeddings
+
+            return func(query, prefix=prefix, user=user)
+
+        return generate_multiple
     else:
         raise ValueError(f"Unknown embedding engine: {embedding_engine}")
 

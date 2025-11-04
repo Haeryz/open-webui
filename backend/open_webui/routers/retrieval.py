@@ -10,8 +10,9 @@ import time
 import re
 import uuid
 from datetime import datetime
+from itertools import accumulate
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Union, Dict, Any
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
 
 from fastapi import (
     Depends,
@@ -1320,6 +1321,7 @@ def save_docs_to_vector_db(
     split: bool = True,
     add: bool = False,
     user=None,
+    progress_update: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> bool:
     def _get_docs_info(docs: list[Document]) -> str:
         docs_info = set()
@@ -1507,10 +1509,48 @@ def save_docs_to_vector_db(
             token_counts.append(token_len)
             total_tokens += token_len
 
+        total_items = len(texts)
+        cumulative_tokens = list(accumulate(token_counts))
+
+        embedding_progress_callback: Optional[Callable[[dict], None]] = None
+
+        if progress_update:
+            def emit_progress(processed_items_value: int, total_items_value: int) -> None:
+                bounded_total = max(int(total_items_value or total_items), 0)
+                bounded_processed = max(
+                    0,
+                    min(int(processed_items_value or 0), bounded_total),
+                )
+                tokens_processed = (
+                    cumulative_tokens[bounded_processed - 1]
+                    if bounded_processed > 0
+                    else 0
+                )
+                progress_update(
+                    {
+                        "processed_items": bounded_processed,
+                        "total_items": bounded_total,
+                        "processed_tokens": tokens_processed,
+                        "total_tokens": total_tokens,
+                        "token_counts": token_counts,
+                    }
+                )
+
+            def embedding_progress_callback(payload: dict) -> None:
+                if not isinstance(payload, dict):
+                    return
+                emit_progress(
+                    payload.get("processed_items", 0),
+                    payload.get("total_items", total_items),
+                )
+
+            emit_progress(0, total_items)
+
         embeddings = embedding_function(
             list(map(lambda x: x.replace("\n", " "), texts)),
             prefix=RAG_EMBEDDING_CONTENT_PREFIX,
             user=user,
+            progress_callback=embedding_progress_callback,
         )
         log.info(f"embeddings generated {len(embeddings)} for {len(texts)} items")
 
@@ -1950,6 +1990,46 @@ def process_file(
                     )
 
                     embedding_start = time.time()
+                    embedding_progress_floor = max(tracker.progress, 60)
+                    embedding_progress_ceiling = max(embedding_progress_floor, 85)
+
+                    def handle_embedding_progress(update: Dict[str, Any]) -> None:
+                        if not isinstance(update, dict):
+                            return
+
+                        processed_chunks = int(update.get("processed_items") or 0)
+                        total_chunks = int(update.get("total_items") or 0)
+                        processed_tokens = int(update.get("processed_tokens") or 0)
+                        total_tokens_progress = int(update.get("total_tokens") or 0)
+
+                        if total_tokens_progress > 0:
+                            step_fraction = processed_tokens / total_tokens_progress
+                        elif total_chunks > 0:
+                            step_fraction = processed_chunks / total_chunks
+                        else:
+                            step_fraction = 0.0
+
+                        step_fraction = max(0.0, min(float(step_fraction), 1.0))
+
+                        projected_progress = embedding_progress_floor + step_fraction * (
+                            embedding_progress_ceiling - embedding_progress_floor
+                        )
+
+                        tracker.update(
+                            progress=max(tracker.progress, round(projected_progress, 2)),
+                            stage="embedding",
+                            step=current_step,
+                            step_label=step_labels.get(current_step, current_step),
+                            step_status="running",
+                            step_progress=round(step_fraction * 100, 2),
+                            extra_step={
+                                "processed_chunks": processed_chunks,
+                                "total_chunks": total_chunks,
+                                "processed_tokens": processed_tokens,
+                                "total_tokens": total_tokens_progress,
+                            },
+                        )
+
                     result = save_docs_to_vector_db(
                         request,
                         docs=docs,
@@ -1961,8 +2041,20 @@ def process_file(
                         },
                         add=bool(form_data.collection_name),
                         user=user,
+                        progress_update=handle_embedding_progress,
                     )
                     embedding_duration = time.time() - embedding_start
+
+                    result_chunks = (
+                        result.get("chunks", len(docs))
+                        if isinstance(result, dict)
+                        else len(docs)
+                    )
+                    result_tokens = (
+                        result.get("total_tokens", 0)
+                        if isinstance(result, dict)
+                        else 0
+                    )
 
                     tracker.update(
                         progress=max(tracker.progress, 85),
@@ -1973,6 +2065,10 @@ def process_file(
                         extra_step={
                             "duration_seconds": round(embedding_duration, 2),
                             "batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+                            "processed_chunks": result_chunks,
+                            "total_chunks": result_chunks,
+                            "processed_tokens": result_tokens,
+                            "total_tokens": result_tokens,
                         },
                     )
 

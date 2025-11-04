@@ -51,6 +51,34 @@
 		}
 	};
 
+	const sanitizeNumber = (value: unknown): number | null => {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+		if (typeof value === 'string' && value.trim() !== '') {
+			const parsed = Number(value);
+			return Number.isFinite(parsed) ? parsed : null;
+		}
+		return null;
+	};
+
+	const clampToMax = (value: number | null, maxValue: number | null): number | null => {
+		if (value === null) {
+			return null;
+		}
+		if (maxValue === null) {
+			return Math.max(0, value);
+		}
+		return Math.max(0, Math.min(value, maxValue));
+	};
+
+	const formatCount = (value: number | null | undefined): string => {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value.toLocaleString();
+		}
+		return '0';
+	};
+
 	$: baseStatus = item?.status ?? item?.file?.data?.status ?? null;
 	$: baseProgress = normalizeProgress(item?.progress ?? item?.file?.data?.progress ?? null);
 	$: processingDetails = item?.processingDetails ?? item?.file?.data?.processing_details ?? null;
@@ -60,6 +88,22 @@
 	$: etaRemainingLabel = eta.remainingSeconds !== null ? formatDurationShort(eta.remainingSeconds) : null;
 	$: etaElapsedLabel = eta.elapsedSeconds !== null ? formatDurationShort(eta.elapsedSeconds) : null;
 	$: errorMessage = item?.error ?? item?.file?.data?.error ?? null;
+	$: embeddingStepDetails = (processingDetails?.steps ?? {})?.embedding ?? null;
+	$: embeddingTokensTotal = sanitizeNumber(
+		embeddingStepDetails?.total_tokens ?? processingDetails?.metrics?.token_stats?.total ?? null
+	);
+	$: embeddingTokensProcessed = clampToMax(
+		sanitizeNumber(embeddingStepDetails?.processed_tokens),
+		embeddingTokensTotal
+	);
+	$: embeddingChunksTotal = sanitizeNumber(embeddingStepDetails?.total_chunks ?? null);
+	$: embeddingChunksProcessed = clampToMax(
+		sanitizeNumber(embeddingStepDetails?.processed_chunks),
+		embeddingChunksTotal
+	);
+	$: showEmbeddingTokens = typeof embeddingTokensTotal === 'number' && embeddingTokensTotal > 0;
+	$: showEmbeddingChunks =
+		showEmbeddingTokens && typeof embeddingChunksTotal === 'number' && embeddingChunksTotal > 0;
 </script>
 
 {#if item}
@@ -201,6 +245,19 @@
 						class="h-full rounded-full bg-blue-500 dark:bg-blue-400 transition-all duration-300"
 						style={`width: ${baseProgress}%`}
 					/>
+				</div>
+			{/if}
+
+			{#if showEmbeddingTokens}
+				<div class="mt-1 text-xs text-gray-500 dark:text-gray-400 flex flex-wrap gap-2">
+					<span>
+						{formatCount(embeddingTokensProcessed ?? 0)} / {formatCount(embeddingTokensTotal)} tokens
+					</span>
+					{#if showEmbeddingChunks}
+						<span class="opacity-80">
+							{formatCount(embeddingChunksProcessed ?? 0)} / {formatCount(embeddingChunksTotal)} chunks
+						</span>
+					{/if}
 				</div>
 			{/if}
 
