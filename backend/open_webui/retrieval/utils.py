@@ -1010,7 +1010,45 @@ def get_embedding_function(
             user=None,
             progress_callback: Optional[Callable[[dict], None]] = None,
         ):
-            return embedding_function.encode(query, **({"prompt": prefix} if prefix else {})).tolist()
+            encode_kwargs = {"prompt": prefix} if prefix else {}
+
+            def _to_python_list(value):
+                return value.tolist() if hasattr(value, "tolist") else value
+
+            if isinstance(query, list):
+                if not query:
+                    return []
+
+                embeddings: list[Any] = []
+                total_items = len(query)
+                batch_size = (
+                    embedding_batch_size
+                    if isinstance(embedding_batch_size, int) and embedding_batch_size > 0
+                    else total_items
+                )
+
+                for start in range(0, total_items, batch_size):
+                    batch = query[start : start + batch_size]
+                    batch_embeddings = embedding_function.encode(batch, **encode_kwargs)
+                    batch_embeddings = _to_python_list(batch_embeddings)
+                    if isinstance(batch_embeddings, list):
+                        embeddings.extend(batch_embeddings)
+                    else:
+                        embeddings.append(batch_embeddings)
+
+                    if callable(progress_callback):
+                        processed_items = min(start + len(batch), total_items)
+                        progress_callback(
+                            {
+                                "processed_items": processed_items,
+                                "total_items": total_items,
+                            }
+                        )
+
+                return embeddings
+
+            result = embedding_function.encode(query, **encode_kwargs)
+            return _to_python_list(result)
 
         return encode_with_optional_progress
     elif embedding_engine in ["ollama", "openai", "azure_openai"]:

@@ -1,13 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher, getContext } from 'svelte';
 	import { formatFileSize } from '$lib/utils';
-	import {
-		estimateProcessingTimes,
-		formatDurationShort,
-		formatProcessingStage,
-		isProcessingStatus,
-		normalizeProgress
-	} from '$lib/utils/file-processing';
+	import { formatProcessingStage, isProcessingStatus, normalizeProgress } from '$lib/utils/file-processing';
 
 	import FileItemModal from './FileItemModal.svelte';
 	import GarbageBin from '../icons/GarbageBin.svelte';
@@ -84,9 +78,6 @@
 	$: processingDetails = item?.processingDetails ?? item?.file?.data?.processing_details ?? null;
 	$: computedLoading = loading || isProcessingStatus(baseStatus, baseProgress);
 	$: activeStageLabel = formatProcessingStage(processingDetails?.stage, baseStatus);
-	$: eta = estimateProcessingTimes(processingDetails, baseProgress, baseStatus);
-	$: etaRemainingLabel = eta.remainingSeconds !== null ? formatDurationShort(eta.remainingSeconds) : null;
-	$: etaElapsedLabel = eta.elapsedSeconds !== null ? formatDurationShort(eta.elapsedSeconds) : null;
 	$: errorMessage = item?.error ?? item?.file?.data?.error ?? null;
 	$: embeddingStepDetails = (processingDetails?.steps ?? {})?.embedding ?? null;
 	$: embeddingTokensTotal = sanitizeNumber(
@@ -261,16 +252,6 @@
 				</div>
 			{/if}
 
-			{#if etaRemainingLabel || etaElapsedLabel}
-				<div class="mt-1 text-xs text-gray-500 dark:text-gray-400 flex flex-wrap gap-1">
-					{#if etaRemainingLabel}
-						<span>{$i18n.t('~{{TIME}} remaining', { TIME: etaRemainingLabel })}</span>
-					{/if}
-					{#if etaElapsedLabel}
-						<span class="opacity-80">{$i18n.t('{{TIME}} elapsed', { TIME: etaElapsedLabel })}</span>
-					{/if}
-				</div>
-			{/if}
 		</div>
 	{/if}
 
